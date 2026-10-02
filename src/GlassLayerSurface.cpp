@@ -468,6 +468,17 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
             // makes the mask fall below threshold early and the glass blinks off.
             maskInfo.maskMode       = 0;
             maskInfo.alphaThreshold = maskThreshold * std::clamp(alpha, 0.0f, 1.0f);
+
+            // Shape the glass to what the layer actually draws. The field's sigma
+            // follows the bezel so the whole curved zone falls inside its usable
+            // range. Rotated outputs keep the bounding-box shape: the mask and the
+            // quad's UV are not in the same orientation there.
+            if (monitor && monitor->m_transform == WL_OUTPUT_TRANSFORM_NORMAL) {
+                const float edgeThickness = resolvePresetFloat(ctx, &SPresetValues::edgeThickness, &SOverridableConfig::edgeThickness);
+                const float bezelPx       = std::max(edgeThickness * 400.0f * static_cast<float>(monitor->m_scale), 1.0f);
+                GlassRenderer::buildMaskField(m_fieldFramebuffer, maskInfo, Vector2D(monitorWidth, monitorHeight),
+                                              transformBox, bezelPx / 2.2f, target);
+            }
             break;
         }
         case EMaskSource::PROTOCOL_REGION: {

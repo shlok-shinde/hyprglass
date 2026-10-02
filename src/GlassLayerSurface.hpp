@@ -107,6 +107,10 @@ class CGlassLayerSurface {
     // Saved currentFB pointer, restored in compositeAndRestore
     SP<Render::IFramebuffer> m_savedCurrentFB;
 
+    // Blurred coverage of this layer's own alpha: the shape its glass is cut to
+    // (alpha-mask layers only, see GlassRenderer::buildMaskField).
+    SP<Render::IFramebuffer> m_fieldFramebuffer;
+
     [[nodiscard]] bool           resolveThemeIsDark() const;
     [[nodiscard]] std::string    resolvePresetName() const;
     [[nodiscard]] ELayerMaskMode resolveMaskMode() const;

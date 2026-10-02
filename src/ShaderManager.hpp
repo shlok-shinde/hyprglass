@@ -55,6 +55,24 @@ struct SGlassUniforms {
     // against, in box-local pixels (see Shaders.hpp).
     GLint glassBoxOffsetPx = -1;
     GLint glassBoxSizePx = -1;
+
+    // Alpha-mask layers only: coverage field the bezel is read from (see maskfield.frag).
+    GLint fieldTex = -1;
+    GLint useField = -1;
+    GLint fieldUVOffset = -1;
+    GLint fieldUVScale = -1;
+    GLint fieldSigmaPx = -1;
+};
+
+struct SFieldUniforms {
+    GLint direction = -1;
+    GLint sigma     = -1;
+    GLint binarize  = -1;
+    GLint encode    = -1;
+    GLint threshold = -1;
+    GLint uvOffset  = -1;
+    GLint uvScale   = -1;
+    GLint uvClamp   = -1;
 };
 
 struct SBlurUniforms {
@@ -75,10 +93,14 @@ class CShaderManager {
     SP<CShader>    blurShader = makeShared<CShader>();
     SBlurUniforms  blurUniforms;
 
+    SP<CShader>    fieldShader = makeShared<CShader>();
+    SFieldUniforms fieldUniforms;
+
   private:
     bool m_initialized = false;
 
     [[nodiscard]] static std::string loadShaderSource(const char* fileName);
     [[nodiscard]] bool compileGlassShader();
     [[nodiscard]] bool compileBlurShader();
+    bool compileFieldShader();
 };

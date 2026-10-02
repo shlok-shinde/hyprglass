@@ -9,7 +9,7 @@ inline const std::unordered_map<std::string, const char*> SHADERS = {
 precision highp float;
 
 /*
- * Apple-style Liquid Glass Fragment Shader — Thick-glass refraction model
+ * Liquid Glass fragment shader — squircle-bezel refraction (nothing-liquid fork)
  *
  * The window is modeled as a thick convex glass slab:
  *   - Center: flat surface → clean frosted blur, no distortion
@@ -96,6 +96,16 @@ uniform vec2 glassBoxSizePx;
 // bounding box (see GlassRenderer::sampleBackground callers in GlassLayerSurface.cpp).
 uniform vec2 sampleUVOffset;
 uniform vec2 sampleUVScale;
+
+// Alpha-mask layers: a gaussian-blurred copy of the layer's own coverage
+// (maskfield.frag). Its level sets stand in for the signed distance to the
+// visible shape, so every pill, card and dock a shell draws gets its own bezel
+// instead of sharing the layer's bounding box.
+uniform sampler2D fieldTex;
+uniform int   useField;
+uniform vec2  fieldUVOffset;   // box UV -> field texture UV
+uniform vec2  fieldUVScale;
+uniform float fieldSigmaPx;    // sigma the field was blurred with, framebuffer px
 
 in vec2 v_texcoord;
 layout(location = 0) out vec4 fragColor;
@@ -195,28 +205,49 @@ float getBevelSDF(vec2 uv) {
 }
 
 // ============================================================================
-// REFRACTION DIRECTION
-// Pixel-space direction toward window center — perfectly smooth everywhere,
-// no SDF gradient needed (optional edge-following blend below). On straight edges the perpendicular pixel distance
-// dominates, giving approximately edge-normal direction. At corners it
-// naturally follows the diagonal.
+// SHAPE FROM COVERAGE (alpha-mask layers)
 // ============================================================================
 
-vec2 refractionDir(vec2 uv) {
-    vec2 toCenterPx = (vec2(0.5) - uv) * fullSize;
-    float len = length(toCenterPx);
-    return len > 0.1 ? toCenterPx / len : vec2(0.0);
+float maskCoverage(vec2 uv) {
+    float a = texture(maskTex, clamp(uv * maskUVScale + maskUVOffset, 0.001, 0.999)).a;
+    return smoothstep(maskAlphaThreshold * 0.6, maskAlphaThreshold * 1.4 + 0.004, a);
 }
 
-// Smooth edge-following field: points into the box, hugging each edge's normal
-// away from the corners and blending crease-free through the diagonals.
-vec2 edgeDir(vec2 posPx) {
-    vec2 halfSize = fullSize * 0.5;
-    vec2 n = abs(posPx) / halfSize;
-    vec2 g = sign(posPx) * pow(n, vec2(7.0)) / halfSize;
-    float len = length(g);
-    return len > 0.0 ? -g / len : vec2(0.0);   // points INTO the box
+float fieldCoverage(vec2 uv) {
+    float e = texture(fieldTex, uv * fieldUVScale + fieldUVOffset).r;
+    float k = 1.0 - e;                 // stored as 1 - sqrt(1 - b): precision where b -> 1
+    return 1.0 - k * k;
 }
+
+// Inverse normal CDF (Abramowitz-Stegun 26.2.23). A straight edge blurred with
+// sigma s reads Phi(d / s) at depth d, so d = s * probit(coverage).
+float probit(float p) {
+    p = clamp(p, 0.002, 0.998);
+    float q  = p < 0.5 ? p : 1.0 - p;
+    float tt = sqrt(-2.0 * log(q));
+    float z  = tt - (2.515517 + 0.802853 * tt + 0.010328 * tt * tt) /
+                    (1.0 + 1.432788 * tt + 0.189269 * tt * tt + 0.001308 * tt * tt * tt);
+    return p < 0.5 ? -z : z;
+}
+
+float fieldDepthPx(vec2 uv) {
+    return fieldSigmaPx * probit(fieldCoverage(uv));
+}
+
+vec2 fieldInwardNormal(vec2 uv) {
+    vec2 h = invFullSize * 3.0;
+    vec2 g = vec2(
+        fieldCoverage(uv + vec2(h.x, 0.0)) - fieldCoverage(uv - vec2(h.x, 0.0)),
+        fieldCoverage(uv + vec2(0.0, h.y)) - fieldCoverage(uv - vec2(0.0, h.y))
+    );
+    float len = length(g);
+    // fade out, rather than snap to zero, where the field goes flat
+    return len > 1e-7 ? (g / len) * smoothstep(0.0, 0.002, len) : vec2(0.0);
+}
+
+// ============================================================================
+// LIGHT
+// ============================================================================
 
 // light direction for a clockwise angle in degrees, 0 = from the top (screen y grows downward)
 vec2 lightDir(float angleDeg) {
@@ -224,28 +255,66 @@ vec2 lightDir(float angleDeg) {
     return vec2(sin(a), -cos(a));
 }
 
-// exact outward normal from the SDF gradient; only meaningful right at the edge
-vec2 sdfOutwardNormal(vec2 uv) {
-    vec2 h = vec2(1.0) / fullSize;
+// ============================================================================
+// GLASS GEOMETRY
+//
+// The pane is a slab whose rim is a convex squircle bezel, the profile Apple
+// uses for Liquid Glass: flat in the interior, rolling over to a vertical wall
+// at the outline.   h(t) = T * (1 - (1 - t)^4)^(1/4),   t = depth / bezelWidth
+// ============================================================================
+
+// Depth inside the outline in pixels (positive inside), crease-free where possible.
+float edgeDepthPx(vec2 uv) {
+    return -(roundingPower == 2.0 ? getBevelSDF(uv) : getCornerSDF(uv));
+}
+
+// Unit vector pointing INTO the pane, perpendicular to the nearest outline.
+vec2 inwardNormal(vec2 uv) {
+    vec2 h = invFullSize;
     vec2 grad = vec2(
-        getCornerSDF(uv + vec2(h.x, 0.0)) - getCornerSDF(uv - vec2(h.x, 0.0)),
-        getCornerSDF(uv + vec2(0.0, h.y)) - getCornerSDF(uv - vec2(0.0, h.y))
+        edgeDepthPx(uv + vec2(h.x, 0.0)) - edgeDepthPx(uv - vec2(h.x, 0.0)),
+        edgeDepthPx(uv + vec2(0.0, h.y)) - edgeDepthPx(uv - vec2(0.0, h.y))
     );
     float len = length(grad);
-    return len > 0.0 ? grad / len : vec2(0.0, -1.0);
+    if (len > 1e-5) return grad / len;
+    vec2 toCenter = (vec2(0.5) - uv) * fullSize;
+    float l2 = length(toCenter);
+    return l2 > 0.1 ? toCenter / l2 : vec2(0.0);
+}
+
+float squircleHeight(float t) {
+    float u = 1.0 - t;
+    return pow(max(1.0 - u * u * u * u, 0.0), 0.25);
+}
+
+// d(height)/dt of the profile above
+float squircleSlope(float t) {
+    float u = 1.0 - t;
+    float g = max(1.0 - u * u * u * u, 1e-4);
+    return u * u * u * pow(g, -0.75);
+}
+
+// Snell's law for a ray travelling straight into the screen and hitting the
+// bezel at normalized depth t. Returns how far (px) the ray has drifted toward
+// the pane's interior by the time it reaches the background plane.
+float refractShiftPx(float t, float thicknessPx, float bezelPx, float ior) {
+    float slope  = squircleSlope(t) * thicknessPx / bezelPx;   // dh/dx of the surface
+    float thetaI = atan(slope);                                 // angle of incidence
+    float thetaR = asin(clamp(sin(thetaI) / ior, -1.0, 1.0));   // n1 sin(i) = n2 sin(r), n1 = 1
+    float h      = squircleHeight(t) * thicknessPx;             // glass under this point
+    return h * tan(thetaI - thetaR);
 }
 
 // ============================================================================
-// MAIN — Thick-glass refraction model
+// MAIN
 // ============================================================================
 
 void main() {
     vec2 uv = v_texcoord;
 
     // Layers only: sample the temp FBO to get the rendered surface pixel.
-    // Discard fully transparent fragments so glass only covers visible content.
-    // For windows, hasMask is false and this block is skipped entirely.
     vec4 surfacePixel = vec4(0.0);
+    float coverage = 1.0;
     bool hasMask = (useMask == 1);
     if (hasMask) {
         vec2 maskUV = uv * maskUVScale + maskUVOffset;
@@ -263,226 +332,161 @@ void main() {
                 }
             }
             if (!insideRegion) { fragColor = surfacePixel; return; } // premultiplied, output as-is
-        } else if (surfacePixel.a < maskAlphaThreshold) {
-            discard;
+        } else {
+            coverage = smoothstep(maskAlphaThreshold * 0.6, maskAlphaThreshold * 1.4 + 0.004, surfacePixel.a);
+            // Not glass here: hand the shell's own pixel (a drop shadow, say) through untouched.
+            if (coverage < 0.002) { fragColor = surfacePixel; return; }
         }
     }
+    bool fieldShape = hasMask && maskMode == 0 && useField == 1;
 
     float cornerSdf    = getCornerSDF(uv);
     float cornerAlpha  = 1.0 - smoothstep(-1.5, 0.5, cornerSdf);
 
     if (maskMode == 1) {
-        // Subsurface items: the glass box (glassBoxOffsetPx/SizePx) can be
-        // smaller than the item's own drawn box/region — e.g. a capsule glass
-        // shape inside a rectangular blur region. Outside it, fall back to the
-        // plain surface pixel instead of dropping it (a hard discard here would
-        // silently delete client content, like an icon, that simply isn't under
-        // the glass). cornerAlpha fades smoothly across the boundary (the same
-        // curve already used for glassA below), so this is an antialiased
-        // "glass * coverage, surface over" blend, not a hard cutover — the
-        // actual blend happens in the hasMask composite at the bottom of main().
         if (cornerAlpha < 0.001) {
             fragColor = surfacePixel;
             return;
         }
     } else {
-        // Windows, and alpha-mask layers: no surface pixel to fall back to
-        // outside the glass shape, so this is exactly the old hard-edged cutoff.
         if (cornerSdf > 0.0) discard;
         if (cornerAlpha < 0.001) discard;
     }
 
-    float minDim = min(fullSize.x, fullSize.y);
-    float bezelWidthPx = edgeThickness * minDim;
+    float px      = max(monitorScale, 0.5);                       // one logical pixel
+    float minDim  = min(glassBoxSizePx.x, glassBoxSizePx.y);
 
-    // ========================================
-    // EDGE PROXIMITY + DIRECTION
-    // edgeProximity: 1.0 at boundary, exponential decay inward
-    // inwardDir: pixel-space direction toward center (smooth everywhere)
-    // Clamped to 1.0: cornerSdf can be positive here (maskMode==1's glass box
-    // can be smaller than fullSize, so fragments just outside it still reach
-    // this code with cornerAlpha > 0.001), and exp() of a positive value would
-    // otherwise overshoot every effect that scales off edgeProximity.
-    // ========================================
-    // crease-free bevel distance, so the edge has no seam along the corner diagonals;
-    // it assumes circular corners, so a superellipse outline keeps the exact SDF
-    float bevelSdf = roundingPower == 2.0 ? getBevelSDF(uv) : cornerSdf;
-    float edgeProximity = min(exp(bevelSdf * invBezelWidthPx), 1.0);
-    vec2 inwardDir = refractionDir(uv);
-    vec2 posPx = (uv - 0.5) * fullSize; // pixel-space position for the edge-flow direction below
-
-    // ========================================
-    // EDGE REFRACTION
-    // Offset sampling UV inward (toward center) at edges — like looking
-    // through the curved thick edge of a glass slab. This compresses
-    // and distorts what's already behind the window, without reaching
-    // beyond the window boundary.
-    // ========================================
-    float refractionPx = refractionStrength * 50.0;
-    float lensFalloff = edgeProximity;
-    if (refractionSpread < 0.999) {
-        // rim-only lens: window the exponential tail so the centre stays flat
-        float depth = -bevelSdf;
-        float tailWindow = 1.0 - smoothstep(1.5 * bezelWidthPx, 3.0 * bezelWidthPx, depth);
-        lensFalloff = mix(edgeProximity * tailWindow, edgeProximity, refractionSpread);
+    // Bezel width is an absolute size (edge_thickness 0.06 = 24 logical px), so a
+    // window gets a rim while a small pill, whose half-height is under that, is
+    // lens all the way through: the size-dependent look of the real material.
+    float bezelPx = clamp(edgeThickness * 400.0 * px, 1.0, max(0.5 * minDim, 1.0));
+    float depthPx;
+    vec2  nIn;
+    if (fieldShape) {
+        // The visible shape, not the layer box, is the pane. Thin shapes never
+        // reach full coverage in the field, which leaves them curved across.
+        bezelPx = max(edgeThickness * 400.0 * px, 1.0);
+        depthPx = max(fieldDepthPx(uv), 0.0);
+        nIn     = fieldInwardNormal(uv);
+    } else {
+        depthPx = max(edgeDepthPx(uv), 0.0);
+        nIn     = inwardNormal(uv);
     }
-    float refractionMag = lensFalloff * refractionPx;
-    vec2 dir = inwardDir;
-    if (refractionFlow > 0.001) {
-        // pull along the edges instead of toward the centre
-        vec2 mixedDir = mix(inwardDir, edgeDir(posPx), refractionFlow);
-        float mixedLen = length(mixedDir);
-        dir = mixedLen > 0.0001 ? mixedDir / mixedLen : inwardDir;
-    }
-    vec2 baseOffset = dir * refractionMag * invFullSize;
+    float t       = clamp(depthPx / bezelPx, 0.004, 1.0);
+    vec2  nOut    = -nIn;
 
     // ========================================
-    // CHROMATIC ABERRATION — per-channel refraction scale
-    // Blue refracts more than red → natural spectral fringing at edges.
+    // REFRACTION — lensing ramps in with the pane's own alpha, so a pane
+    // materializes by bending light rather than by cross-fading.
     // ========================================
-    float chromaSpread = chromaticAberration * 0.35;
-    vec2 offsetR = baseOffset * (1.0 - chromaSpread);
-    vec2 offsetG = baseOffset;
-    vec2 offsetB = baseOffset * (1.0 + chromaSpread);
+    float materialize = smoothstep(0.0, 1.0, clamp(glassOpacity, 0.0, 1.0));
+    float thicknessPx = refractionStrength * bezelPx * materialize;
 
-    // ========================================
-    // CENTER DOME LENS (subtle magnification in the flat interior)
-    // Fades near edges so it doesn't interfere with edge refraction.
-    // ========================================
+    const float IOR = 1.5;
+    float dispersion = chromaticAberration * 0.12;
+    float shiftG = refractShiftPx(t, thicknessPx, bezelPx, IOR);
+    vec2 offG = nIn * shiftG * invFullSize;
+
+    // subtle dome in the flat interior
     vec2 domeUV = vec2(0.0);
     if (lensDistortion > 0.001) {
         vec2 c = (uv - 0.5) * 2.0;
-        vec2 dGrad = vec2(
-            -4.0 * c.x * (1.0 - c.y * c.y),
-            -4.0 * c.y * (1.0 - c.x * c.x)
-        );
-        float lensFade = 1.0 - edgeProximity;
-        domeUV = dGrad * lensMaxPx * lensFade * invFullSize;
+        vec2 dGrad = vec2(-4.0 * c.x * (1.0 - c.y * c.y), -4.0 * c.y * (1.0 - c.x * c.x));
+        domeUV = dGrad * lensMaxPx * smoothstep(0.0, 1.0, t) * invFullSize;
     }
 
-    // ========================================
-    // BACKGROUND SAMPLING (frosted blur only)
-    // Nearby color influence comes naturally from the Gaussian blur
-    // kernel crossing the window boundary — no explicit raw sampling.
-    // ========================================
     vec3 color;
-    vec2 uvR = uv + offsetR + domeUV;
-    vec2 uvG = uv + offsetG + domeUV;
-    vec2 uvB = uv + offsetB + domeUV;
-
-    if (chromaticAberration > 0.001 && edgeProximity > 0.01) {
-        color.r = sampleBlurred(uvR).r;
-        color.g = sampleBlurred(uvG).g;
-        color.b = sampleBlurred(uvB).b;
+    if (dispersion > 0.0005 && t < 0.999) {
+        float shiftR = refractShiftPx(t, thicknessPx, bezelPx, IOR - dispersion);
+        float shiftB = refractShiftPx(t, thicknessPx, bezelPx, IOR + dispersion);
+        color.r = sampleBlurred(uv + nIn * shiftR * invFullSize + domeUV).r;
+        color.g = sampleBlurred(uv + offG + domeUV).g;
+        color.b = sampleBlurred(uv + nIn * shiftB * invFullSize + domeUV).b;
     } else {
-        color = sampleBlurred(uvG).rgb;
+        color = sampleBlurred(uv + offG + domeUV).rgb;
     }
 
     // ========================================
-    // FROSTED TINT (per-theme tone mapping)
+    // TONE (dimming layer / adaptivity)
     // ========================================
-    float blurredLum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(lum), color, saturation);
 
-    // Frosted desaturation
-    color = mix(vec3(blurredLum), color, saturation);
-
-    // Tight smoothstep range maps the blur-compressed luminance (~0.3-0.7)
-    // to the full [0,1] adaptive range, creating visible per-region differentiation
-    float lumCurve = smoothstep(0.25, 0.55, blurredLum);
-
-    // Dim: multiplicative — effective at darkening bright areas
+    float lumCurve = smoothstep(0.25, 0.55, lum);
     color *= brightness * (1.0 - adaptiveDim * lumCurve);
-
-    // Boost: additive lift — multiplicative can't brighten near-black content
     color += vec3(adaptiveBoost * (1.0 - lumCurve) * 0.5);
-
-    // Contrast (pivot around midpoint)
     color = mix(vec3(0.5), color, contrast);
 
-    // Vibrancy (selective saturation boost scaled by existing saturation)
     float currentLum = dot(color, vec3(0.2126, 0.7152, 0.0722));
     float sat = max(color.r, max(color.g, color.b)) - min(color.r, min(color.g, color.b));
-    float darkFactor = 1.0 - vibrancyDarkness * (1.0 - blurredLum);
+    float darkFactor = 1.0 - vibrancyDarkness * (1.0 - lum);
     color = mix(vec3(currentLum), color, 1.0 + vibrancy * sat * darkFactor);
 
-    // ========================================
-    // COLOR TINT OVERLAY
-    // ========================================
     color = mix(color, tintColor, tintAlpha);
 
     // ========================================
-    // BEVEL — thin lit line hugging the edge, brightest on the side facing the light
+    // INNER GLOW — light scattered inside the curved rim
+    // ========================================
+    float rimFall = 1.0 - smoothstep(0.0, 1.0, t);
+    if (fresnelStrength > 0.001) {
+        vec3 glow = vec3(1.0);
+        if (fresnelColorAlpha > 0.001) glow = mix(glow, fresnelColor, fresnelColorAlpha);
+        if (fresnelTint > 0.001) {
+            float maxC = max(max(color.r, color.g), color.b);
+            glow = mix(glow, maxC > 0.001 ? color / maxC : vec3(1.0), fresnelTint);
+        }
+        color += glow * rimFall * rimFall * fresnelStrength * 0.10;
+    }
+
+    // ========================================
+    // RIM LIGHT — a hairline that is brightest where the outline faces the key
+    // light and, weaker, on the opposite side where that light leaves the slab.
+    // The two flanks in between stay nearly dark, which is what gives the
+    // material its characteristic diagonal sparkle.
     // ========================================
     if (bevelStrength > 0.001) {
-        float sizePx = max(bevelSize * monitorScale, 1.0);   // logical px, uniform across monitor scales
-        float core = 0.25 * sizePx;
-        float tail = sizePx;
-        float ring = (1.0 - smoothstep(-core, 0.0, cornerSdf)) * smoothstep(-tail, -core, cornerSdf);
+        vec2  L      = lightDir(bevelAngle);
+        float ndl    = dot(nOut, L);
+        float lit    = pow(max(ndl, 0.0), 1.6);
+        float back   = pow(max(-ndl, 0.0), 2.4) * 0.6;
+        float facing = clamp(lit + back + 0.10, 0.0, 1.0);
 
-        // lit side faces the light, the far side fades out and can be shadowed
-        float facing = clamp(dot(sdfOutwardNormal(uv), lightDir(bevelAngle)) * 0.5 + 0.5, 0.0, 1.0);
+        float lineW  = max(0.9 * px, 0.75);
+        float line   = exp(-(depthPx * depthPx) / (2.0 * lineW * lineW));
+        if (fieldShape) {
+            // The field is too soft to place a hairline: probe the real outline instead.
+            vec2 stepOut = nOut * invFullSize * lineW;
+            line = clamp(1.0 - 0.65 * maskCoverage(uv + stepOut * 1.2) - 0.35 * maskCoverage(uv + stepOut * 2.4), 0.0, 1.0);
+        }
+        float bandW  = max(bevelSize * px, 1.0);
+        float band   = exp(-depthPx / bandW) * 0.28;
 
-        vec3 bevelLight = vec3(1.0);
-        if (bevelColorAlpha > 0.001) bevelLight = mix(vec3(1.0), bevelColor, bevelColorAlpha);   // a dark colour gives a dark line
+        vec3 rimLight = vec3(1.0);
+        if (bevelColorAlpha > 0.001) rimLight = mix(rimLight, bevelColor, bevelColorAlpha);
         if (bevelTint > 0.001) {
             float maxC = max(max(color.r, color.g), color.b);
-            bevelLight = mix(bevelLight, maxC > 0.001 ? color / maxC : vec3(1.0), bevelTint);
+            rimLight = mix(rimLight, maxC > 0.001 ? color / maxC : vec3(1.0), bevelTint);
         }
+        color = mix(color, rimLight, clamp((line + band) * facing * bevelStrength, 0.0, 1.0));
 
-        color = mix(color, bevelLight, ring * facing * bevelStrength);
+        // the unlit flanks read slightly darker than the pane
         if (bevelShadow > 0.001)
-            color = mix(color, vec3(0.0), ring * (1.0 - facing) * bevelShadow);
+            color *= 1.0 - bevelShadow * band * 1.6 * (1.0 - clamp(lit + back, 0.0, 1.0));
     }
 
     // ========================================
-    // FRESNEL RIM GLOW (edge zone)
-    // ========================================
-    if (fresnelStrength > 0.001) {
-        float fresnel = edgeProximity * edgeProximity * fresnelStrength * 0.15;
-        vec3 fresnelLight = vec3(1.0);
-        if (fresnelColorAlpha > 0.001) fresnelLight = mix(vec3(1.0), fresnelColor, fresnelColorAlpha);   // chosen colour, then the tint below
-        if (fresnelTint > 0.001) {
-            // rim light in the background's own hue, at full brightness so the gain matches white
-            float maxC = max(max(color.r, color.g), color.b);
-            fresnelLight = mix(fresnelLight, maxC > 0.001 ? color / maxC : vec3(1.0), fresnelTint);
-        }
-        color += fresnelLight * fresnel;
-    }
-
-    // ========================================
-    // SPECULAR — subtle top highlight (edge zone)
+    // SHEEN — broad, soft light across the bezel on the lit side
     // ========================================
     if (specularStrength > 0.001) {
-        float specT = max(1.0 - uv.y, 0.0);
-        if (abs(specularAngle) > 0.001) {
-            // rotate the highlight gradient toward the light: at angle 0, lightDir gives
-            // (0,-1) and dot(uv-0.5, L) = 0.5-uv.y, so 0.5+dot(...) reduces to 1-uv.y exactly
-            vec2 L = lightDir(specularAngle);
-            specT = clamp(0.5 + dot(uv - 0.5, L), 0.0, 1.0);
-        }
-        float topBias = pow(specT, 2.0);
-        float spec = topBias * edgeProximity * edgeProximity * specularStrength * 0.08;
-        color += vec3(1.0, 0.99, 0.97) * spec;
+        vec2  L     = lightDir(specularAngle);
+        float specT = clamp(0.5 + dot(uv - 0.5, L), 0.0, 1.0);
+        color += vec3(1.0, 0.99, 0.97) * specT * specT * rimFall * specularStrength * 0.10;
     }
 
-    // ========================================
-    // INNER SHADOW (bottom rim)
-    // ========================================
-    {
-        float bottomBias = pow(uv.y, 2.0);
-        float shadow = bottomBias * edgeProximity * edgeProximity * 0.06;
-        color *= 1.0 - shadow;
-    }
-
-    // float framebuffers (FP16 under wide-gamut cm) store unbounded values and
-    // the glass re-samples its own output: unclamped color diverges over frames
     color = clamp(color, 0.0, 1.0);
-    float glassA = clamp(glassOpacity * cornerAlpha, 0.0, 1.0);
+    float glassA = clamp(glassOpacity * cornerAlpha * coverage, 0.0, 1.0);
 
     if (hasMask) {
-        // Layers only: composite the rendered surface over the glass effect
-        // in a single pass. surfacePixel is premultiplied alpha from Hyprland's
-        // surface rendering, so we unpremultiply before the 'over' blend.
         float surfA = surfacePixel.a;
         vec3 surfRGB = surfA > 0.001 ? surfacePixel.rgb / surfA : vec3(0.0);
 
@@ -491,14 +495,61 @@ void main() {
             ? (surfRGB * surfA + color * glassA * (1.0 - surfA)) / compA
             : vec3(0.0);
 
-        // Hyprland's compositor expects premultiplied alpha (blend GL_ONE, GL_ONE_MINUS_SRC_ALPHA).
         fragColor = vec4(compRGB * compA, compA);
     } else {
-        // Windows: output the glass effect alone, surface is rendered separately by Hyprland.
-        // Premultiplied: without this, a fading window's glass keeps full RGB contribution
-        // because the GL_ONE source factor adds raw color regardless of alpha.
         fragColor = vec4(color * glassA, glassA);
     }
+}
+)GLSL"},
+
+    {"maskfield.frag", R"GLSL(
+#version 300 es
+precision highp float;
+
+/*
+ * Builds the coverage field liquidglass.frag reads its bezel from: the layer's
+ * alpha, thresholded to "glass / not glass" and gaussian-blurred. Run twice
+ * (horizontal with binarize = 1, then vertical with encode = 1).
+ */
+
+uniform sampler2D tex;
+uniform vec2  direction;   // one tap step along the blur axis, in tex UV
+uniform float sigma;       // in tap steps
+uniform int   binarize;    // 1: tex is the layer's rendered surface, read alpha and threshold it
+uniform int   encode;      // 1: write 1 - sqrt(1 - b)
+uniform float threshold;
+uniform vec2  uvOffset;    // output UV -> tex UV
+uniform vec2  uvScale;
+uniform vec4  uvClamp;     // tex-UV rect that holds the layer; outside it nothing is covered
+
+in vec2 v_texcoord;
+layout(location = 0) out vec4 fragColor;
+
+float tap(vec2 uv) {
+    if (binarize == 1) {
+        if (uv.x < uvClamp.x || uv.y < uvClamp.y || uv.x > uvClamp.z || uv.y > uvClamp.w)
+            return 0.0;
+        return smoothstep(threshold * 0.6, threshold * 1.4 + 0.004, texture(tex, uv).a);
+    }
+    return texture(tex, uv).r;
+}
+
+void main() {
+    vec2  uv   = v_texcoord * uvScale + uvOffset;
+    float inv  = -0.5 / (sigma * sigma);
+    float sum  = tap(uv);
+    float wsum = 1.0;
+    int   n    = int(min(ceil(sigma * 3.0), 48.0));
+    for (int i = 1; i <= n; i++) {
+        float x = float(i);
+        float w = exp(x * x * inv);
+        sum  += (tap(uv + direction * x) + tap(uv - direction * x)) * w;
+        wsum += 2.0 * w;
+    }
+    float b = sum / wsum;
+    if (encode == 1)
+        b = 1.0 - sqrt(max(1.0 - b, 0.0));
+    fragColor = vec4(b, b, b, 1.0);
 }
 )GLSL"},
 

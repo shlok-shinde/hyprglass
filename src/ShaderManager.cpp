@@ -77,6 +77,11 @@ bool CShaderManager::compileGlassShader() {
     glassUniforms.sampleUVScale       = glGetUniformLocation(program, "sampleUVScale");
     glassUniforms.glassBoxOffsetPx    = glGetUniformLocation(program, "glassBoxOffsetPx");
     glassUniforms.glassBoxSizePx      = glGetUniformLocation(program, "glassBoxSizePx");
+    glassUniforms.fieldTex            = glGetUniformLocation(program, "fieldTex");
+    glassUniforms.useField            = glGetUniformLocation(program, "useField");
+    glassUniforms.fieldUVOffset       = glGetUniformLocation(program, "fieldUVOffset");
+    glassUniforms.fieldUVScale        = glGetUniformLocation(program, "fieldUVScale");
+    glassUniforms.fieldSigmaPx        = glGetUniformLocation(program, "fieldSigmaPx");
 
     return true;
 }
@@ -101,6 +106,32 @@ bool CShaderManager::compileBlurShader() {
     return true;
 }
 
+bool CShaderManager::compileFieldShader() {
+    if (!fieldShader->createProgram(
+            g_pHyprOpenGL->m_shaders->TEXVERTSRC,
+            loadShaderSource("maskfield.frag"),
+            true
+        )) {
+        HyprlandAPI::addNotification(PHANDLE,
+            std::format("[{}] Failed to compile mask field shader", PLUGIN_NAME),
+            CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
+        return false;
+    }
+
+    const auto program = fieldShader->program();
+
+    fieldUniforms.direction = glGetUniformLocation(program, "direction");
+    fieldUniforms.sigma     = glGetUniformLocation(program, "sigma");
+    fieldUniforms.binarize  = glGetUniformLocation(program, "binarize");
+    fieldUniforms.encode    = glGetUniformLocation(program, "encode");
+    fieldUniforms.threshold = glGetUniformLocation(program, "threshold");
+    fieldUniforms.uvOffset  = glGetUniformLocation(program, "uvOffset");
+    fieldUniforms.uvScale   = glGetUniformLocation(program, "uvScale");
+    fieldUniforms.uvClamp   = glGetUniformLocation(program, "uvClamp");
+
+    return true;
+}
+
 void CShaderManager::initializeIfNeeded() {
     if (m_initialized)
         return;
@@ -111,11 +142,15 @@ void CShaderManager::initializeIfNeeded() {
     if (!compileBlurShader())
         return;
 
+    if (!compileFieldShader())
+        return;
+
     m_initialized = true;
 }
 
 void CShaderManager::destroy() noexcept {
     glassShader->destroy();
     blurShader->destroy();
+    fieldShader->destroy();
     m_initialized = false;
 }

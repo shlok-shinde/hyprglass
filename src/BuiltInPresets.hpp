@@ -183,6 +183,77 @@ inline SCustomPreset makePomme() {
     return p;
 }
 
+// ── nothing-liquid presets ───────────────────────────────────────────────────
+// Tuned against the squircle-bezel Snell model in Shaders.hpp.
+//   edge_thickness      bezel width, 0.06 = 24 logical px (capped at half the pane)
+//   refraction_strength glass thickness relative to the bezel width (1 = as thick as wide)
+//   chromatic_aberration dispersion of the refractive index across R/G/B
+//   bevel_*             the hairline rim light and its soft inner band
+//   fresnel_strength    light scattered inside the curved rim
+
+// macOS Tahoe "Clear": barely any frost, strong lensing, a dimming layer for legibility.
+inline SCustomPreset makeTahoeClear() {
+    SCustomPreset p;
+    p.name = "tahoe_clear";
+
+    p.shared.blurStrength        = 0.22f;
+    p.shared.blurIterations      = 2;
+    p.shared.refractionStrength  = 1.6f;
+    p.shared.chromaticAberration = 0.55f;
+    p.shared.edgeThickness       = 0.06f;
+    p.shared.lensDistortion      = 0.0f;
+    p.shared.fresnelStrength     = 0.55f;
+    p.shared.fresnelTint         = 0.35f;
+    p.shared.fresnelColor        = 0xffffff00;
+    p.shared.specularStrength    = 0.45f;
+    p.shared.specularAngle       = 315.0f;
+    p.shared.bevelStrength       = 0.85f;
+    p.shared.bevelSize           = 5.0f;
+    p.shared.bevelTint           = 0.15f;
+    p.shared.bevelAngle          = 315.0f;
+    p.shared.bevelShadow         = 0.25f;
+    p.shared.glassOpacity        = 1.0f;
+
+    p.dark.brightness            = 0.80f;
+    p.dark.contrast              = 1.0f;
+    p.dark.saturation            = 1.0f;
+    p.dark.vibrancy              = 0.10f;
+    p.dark.vibrancyDarkness      = 0.0f;
+    p.dark.adaptiveDim           = 0.30f;
+    p.dark.adaptiveBoost         = 0.0f;
+    p.dark.tintColor             = 0x00000024;
+
+    p.light.brightness           = 1.04f;
+    p.light.contrast             = 1.0f;
+    p.light.saturation           = 1.0f;
+    p.light.vibrancy             = 0.10f;
+    p.light.vibrancyDarkness     = 0.0f;
+    p.light.adaptiveDim          = 0.0f;
+    p.light.adaptiveBoost        = 0.25f;
+    p.light.tintColor            = 0xffffff30;
+
+    return p;
+}
+
+// macOS Tahoe "Regular": more frost and tint, for panes that carry text.
+inline SCustomPreset makeTahoeRegular() {
+    SCustomPreset p = makeTahoeClear();
+    p.name = "tahoe";
+
+    p.shared.blurStrength        = 0.9f;
+    p.shared.blurIterations      = 2;
+    p.shared.refractionStrength  = 1.3f;
+    p.shared.chromaticAberration = 0.4f;
+
+    p.dark.brightness            = 0.72f;
+    p.dark.adaptiveDim           = 0.45f;
+    p.dark.tintColor             = 0x0a0a0a66;
+
+    p.light.tintColor            = 0xffffff70;
+
+    return p;
+}
+
 inline std::unordered_map<std::string, SCustomPreset> getAll() {
     std::unordered_map<std::string, SCustomPreset> presets;
 
@@ -193,6 +264,8 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     add(makeClear());
     add(makeGlass());
     add(makePomme());
+    add(makeTahoeClear());
+    add(makeTahoeRegular());
 
     return presets;
 }

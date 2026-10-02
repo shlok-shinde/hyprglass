@@ -407,6 +407,102 @@ void blurBackground(SP<Render::IFramebuffer> sampleFramebuffer, float radius, in
         static_cast<int>(callerFramebuffer->m_size.y));
 }
 
+bool buildMaskField(SP<Render::IFramebuffer>& fieldFramebuffer, SMaskInfo& mask, const Vector2D& maskTextureSize,
+                    const CBox& box, float sigmaPx, SP<Render::IFramebuffer> callerFramebuffer) {
+    auto& shaderManager = g_pGlobalState->shaderManager;
+    if (!shaderManager.isInitialized() || !callerFramebuffer || mask.textureId == 0 || sigmaPx < 0.5f ||
+        box.w < 1.0 || box.h < 1.0 || maskTextureSize.x < 1.0 || maskTextureSize.y < 1.0)
+        return false;
+
+    // Room around the box for the blur to fall off into "not covered".
+    const int padPx      = static_cast<int>(std::ceil(sigmaPx * 3.0f));
+    const int fullWidth  = static_cast<int>(box.w) + 2 * padPx;
+    const int fullHeight = static_cast<int>(box.h) + 2 * padPx;
+    const int width      = std::max(1, fullWidth / FIELD_DOWNSCALE);
+    const int height     = std::max(1, fullHeight / FIELD_DOWNSCALE);
+
+    // Half-float: at 8 bits the field has plateaus, and the bezel normal is its gradient.
+    static DRMFormat fieldFormat = DRM_FORMAT_ABGR16161616F;
+    const auto ensure = [&](SP<Render::IFramebuffer>& framebuffer, const char* name) {
+        if (!framebuffer)
+            framebuffer = g_pHyprRenderer->createFB(name);
+        if (framebuffer->m_size.x == width && framebuffer->m_size.y == height && framebuffer->m_drmFormat == fieldFormat)
+            return true;
+        if (framebuffer->alloc(width, height, fieldFormat))
+            return true;
+        if (fieldFormat == DRM_FORMAT_ARGB8888)
+            return false;
+        fieldFormat = DRM_FORMAT_ARGB8888; // no renderable half-float on this GPU
+        return framebuffer->alloc(width, height, fieldFormat);
+    };
+
+    auto& scratch = g_pGlobalState->fieldTempFramebuffer;
+    if (!ensure(scratch, "hyprglass-field-temp") || !ensure(fieldFramebuffer, "hyprglass-field"))
+        return false;
+
+    static constexpr std::array<float, 9> FULLSCREEN_PROJECTION = {
+        2.0f, 0.0f, 0.0f,
+        0.0f, 2.0f, 0.0f,
+       -1.0f,-1.0f, 1.0f,
+    };
+
+    const auto& uniforms = shaderManager.fieldUniforms;
+
+    g_pHyprRenderer->blend(false);
+    g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
+    if (glIsEnabled(GL_SCISSOR_TEST))
+        glDisable(GL_SCISSOR_TEST);
+    if (glIsEnabled(GL_STENCIL_TEST))
+        glDisable(GL_STENCIL_TEST);
+
+    auto shader = g_pHyprOpenGL->useShader(shaderManager.fieldShader);
+    shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_FALSE, FULLSCREEN_PROJECTION);
+    shader->setUniformInt(SHADER_TEX, 0);
+    glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
+    g_pHyprOpenGL->setViewport(0, 0, width, height);
+    glActiveTexture(GL_TEXTURE0);
+
+    const float stepPx = static_cast<float>(FIELD_DOWNSCALE);
+    glUniform1f(uniforms.sigma, sigmaPx / stepPx);
+    glUniform1f(uniforms.threshold, mask.alphaThreshold);
+
+    // Horizontal: layer surface (monitor-sized texture) -> scratch, thresholding as it goes.
+    glBindFramebuffer(GL_FRAMEBUFFER, fbId(scratch));
+    glBindTexture(mask.target, mask.textureId);
+    glUniform1i(uniforms.binarize, 1);
+    glUniform1i(uniforms.encode, 0);
+    glUniform2f(uniforms.uvScale, static_cast<float>(fullWidth / maskTextureSize.x), static_cast<float>(fullHeight / maskTextureSize.y));
+    glUniform2f(uniforms.uvOffset, static_cast<float>((box.x - padPx) / maskTextureSize.x), static_cast<float>((box.y - padPx) / maskTextureSize.y));
+    glUniform4f(uniforms.uvClamp,
+        static_cast<float>(box.x / maskTextureSize.x), static_cast<float>(box.y / maskTextureSize.y),
+        static_cast<float>((box.x + box.w) / maskTextureSize.x), static_cast<float>((box.y + box.h) / maskTextureSize.y));
+    glUniform2f(uniforms.direction, stepPx / static_cast<float>(maskTextureSize.x), 0.0f);
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    // Vertical: scratch -> field.
+    glBindFramebuffer(GL_FRAMEBUFFER, fbId(fieldFramebuffer));
+    scratch->getTexture()->bind();
+    glUniform1i(uniforms.binarize, 0);
+    glUniform1i(uniforms.encode, 1);
+    glUniform2f(uniforms.uvScale, 1.0f, 1.0f);
+    glUniform2f(uniforms.uvOffset, 0.0f, 0.0f);
+    glUniform2f(uniforms.direction, 0.0f, 1.0f / static_cast<float>(height));
+    glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
+
+    g_pHyprRenderer->blend(true);
+    glBindFramebuffer(GL_FRAMEBUFFER, fbId(callerFramebuffer));
+    glBindVertexArray(0);
+    g_pHyprOpenGL->setViewport(0, 0,
+        static_cast<int>(callerFramebuffer->m_size.x),
+        static_cast<int>(callerFramebuffer->m_size.y));
+
+    mask.fieldTextureId = fieldFramebuffer->getTexture()->m_texID;
+    mask.fieldUVScale   = Vector2D(box.w / fullWidth, box.h / fullHeight);
+    mask.fieldUVOffset  = Vector2D(static_cast<double>(padPx) / fullWidth, static_cast<double>(padPx) / fullHeight);
+    mask.fieldSigmaPx   = sigmaPx;
+    return true;
+}
+
 void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFramebuffer> targetFramebuffer,
                        CBox& rawBox, CBox& transformedBox,
                        float alpha, const std::array<float, 4>& radii, float roundingPower,
@@ -441,6 +537,10 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     if (mask && mask->textureId != 0) {
         glActiveTexture(GL_TEXTURE1);
         glBindTexture(mask->target, mask->textureId);
+        if (mask->fieldTextureId != 0) {
+            glActiveTexture(GL_TEXTURE2);
+            glBindTexture(GL_TEXTURE_2D, mask->fieldTextureId);
+        }
         glActiveTexture(GL_TEXTURE0);
     }
 
@@ -540,7 +640,15 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
             static_cast<float>(mask->sampleUVOffset.x), static_cast<float>(mask->sampleUVOffset.y));
         glUniform2f(uniforms.sampleUVScale,
             static_cast<float>(mask->sampleUVScale.x), static_cast<float>(mask->sampleUVScale.y));
+        glUniform1i(uniforms.fieldTex, 2);
+        glUniform1i(uniforms.useField, mask->fieldTextureId != 0 ? 1 : 0);
+        glUniform2f(uniforms.fieldUVOffset,
+            static_cast<float>(mask->fieldUVOffset.x), static_cast<float>(mask->fieldUVOffset.y));
+        glUniform2f(uniforms.fieldUVScale,
+            static_cast<float>(mask->fieldUVScale.x), static_cast<float>(mask->fieldUVScale.y));
+        glUniform1f(uniforms.fieldSigmaPx, mask->fieldSigmaPx);
     } else {
+        glUniform1i(uniforms.useField, 0);
         glUniform1i(uniforms.useMask, 0);
         glUniform1f(uniforms.maskAlphaThreshold, 0.001f);
         glUniform1i(uniforms.maskMode, 0);

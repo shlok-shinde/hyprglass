@@ -37,6 +37,9 @@ struct SGlobalState {
     // Shared blur temp framebuffer (reused across all decorations since they render sequentially)
     SP<Render::IFramebuffer> blurTempFramebuffer;
 
+    // Shared scratch target for the two-pass mask field (see GlassRenderer::buildMaskField)
+    SP<Render::IFramebuffer> fieldTempFramebuffer;
+
     // Per-monitor temp FBO for subsurface item glass, shared serially by every
     // glassed item on that monitor in a frame — a per-item copy would be one
     // full-monitor-sized allocation each. Safe because items on the same

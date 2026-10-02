@@ -85,7 +85,26 @@ struct SMaskInfo {
     // layers) leaves this at the default and sees no change at all.
     Vector2D glassBoxOffsetPx{0.0, 0.0};
     Vector2D glassBoxSizePx{-1.0, -1.0};
+
+    // Alpha-mask layers only: the coverage field built by buildMaskField().
+    // fieldTextureId == 0 means "no field", and the shader falls back to the
+    // layer's bounding box as the glass shape.
+    GLuint   fieldTextureId = 0;
+    Vector2D fieldUVOffset{0.0, 0.0};
+    Vector2D fieldUVScale{1.0, 1.0};
+    float    fieldSigmaPx = 0.0f;
 };
+
+// The field is smooth, so it is built at half resolution.
+inline constexpr int FIELD_DOWNSCALE = 2;
+
+// Blurs the layer's thresholded alpha into fieldFramebuffer and fills the field
+// members of `mask`. maskTextureSize is the size of the texture mask.textureId
+// names (the monitor-sized temp FBO); box is the layer's box in that texture's
+// pixels. callerFramebuffer is re-bound afterwards. Returns false, leaving
+// `mask` untouched, when the field could not be built.
+bool buildMaskField(SP<Render::IFramebuffer>& fieldFramebuffer, SMaskInfo& mask, const Vector2D& maskTextureSize,
+                    const CBox& box, float sigmaPx, SP<Render::IFramebuffer> callerFramebuffer);
 
 // Affine map from source-framebuffer pixels into the sample framebuffer.
 // sampleBackground() blits through it and blendOwnContent() draws through it;
