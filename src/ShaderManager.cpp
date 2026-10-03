@@ -132,6 +132,28 @@ bool CShaderManager::compileFieldShader() {
     return true;
 }
 
+bool CShaderManager::compileGenieShader() {
+    if (!genieShader->createProgram(
+            g_pHyprOpenGL->m_shaders->TEXVERTSRC,
+            loadShaderSource("genie.frag"),
+            true
+        )) {
+        HyprlandAPI::addNotification(PHANDLE,
+            std::format("[{}] Failed to compile genie shader", PLUGIN_NAME),
+            CHyprColor{1.0, 0.2, 0.2, 1.0}, 5000);
+        return false;
+    }
+
+    const auto program = genieShader->program();
+
+    genieUniforms.fbSize   = glGetUniformLocation(program, "fbSize");
+    genieUniforms.srcBox   = glGetUniformLocation(program, "srcBox");
+    genieUniforms.target   = glGetUniformLocation(program, "target");
+    genieUniforms.progress = glGetUniformLocation(program, "progress");
+
+    return true;
+}
+
 void CShaderManager::initializeIfNeeded() {
     if (m_initialized)
         return;
@@ -145,6 +167,9 @@ void CShaderManager::initializeIfNeeded() {
     if (!compileFieldShader())
         return;
 
+    if (!compileGenieShader())
+        return;
+
     m_initialized = true;
 }
 
@@ -152,5 +177,6 @@ void CShaderManager::destroy() noexcept {
     glassShader->destroy();
     blurShader->destroy();
     fieldShader->destroy();
+    genieShader->destroy();
     m_initialized = false;
 }

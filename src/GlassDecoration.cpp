@@ -1,3 +1,4 @@
+#include "Genie.hpp"
 #include "GlassDecoration.hpp"
 #include "BackgroundDamageObserver.hpp"
 #include "BuiltInPresets.hpp"
@@ -192,7 +193,13 @@ void CGlassDecoration::queueGlassPass(float alpha) {
     // m_renderPass, never addPassElement: draw() runs inside Hyprland's own
     // per-window redirect for transformed windows (motion blur), whose pass
     // renders into a work buffer cleared to transparent — nothing to sample.
-    g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassPassElement>(data));
+    // The genie is the exception: the glass has to travel with the window into
+    // the lamp, and it draws from its cached backdrop meanwhile (see
+    // wantsBackgroundResample), so it joins the redirected pass.
+    if (Genie::isAnimating(m_window.lock()))
+        g_pHyprRenderer->addPassElement(makeUnique<CGlassPassElement>(data));
+    else
+        g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassPassElement>(data));
 }
 
 void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
@@ -283,6 +290,11 @@ bool CGlassDecoration::wantsBackgroundResample(PHLMONITOR monitor, const CBox& t
     if (!m_hasCachedSample)
         return true; // first frame: nothing to reuse yet
 
+    // Mid-genie the window renders into a redirected pass with no desktop behind
+    // it: sampling now would cache emptiness. Keep the backdrop from before.
+    if (Genie::isAnimating(m_window.lock()))
+        return false;
+
     // Per-monitor generation (see m_lastGenerationMonitor's declaration):
     // covers future commit/close-behind-cache invalidation as well as
     // existing event bumps, and forces a resample the instant a window
@@ -340,7 +352,9 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha) {
     // Belt and braces: draw() already refuses to queue a pass element for a foreign
     // render, but a caller that reaches renderPass() during one anyway must not sample
     // the foreign framebuffer into this decoration's persistent background cache.
-    if (RenderGuards::isForeignRender())
+    // The genie's redirected pass is the one foreign render glass belongs in:
+    // it only ever draws there from its cached backdrop (wantsBackgroundResample).
+    if (RenderGuards::isForeignRender() && !Genie::isAnimating(m_window.lock()))
         return;
 
     auto& shaderManager = g_pGlobalState->shaderManager;

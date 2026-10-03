@@ -553,6 +553,62 @@ void main() {
 }
 )GLSL"},
 
+    {"genie.frag", R"GLSL(
+#version 300 es
+precision highp float;
+
+/*
+ * Magic lamp. Inverse-maps every output pixel back into the window:
+ *   - the window's two sides bend into a funnel that ends at the target
+ *   - the window then slides down that funnel, squeezed to its width
+ * progress 0 is the window at rest, 1 is the window gone into the target.
+ */
+
+uniform sampler2D tex;
+uniform vec2  fbSize;     // framebuffer pixels
+uniform vec4  srcBox;     // window: x, y, w, h
+uniform vec3  target;     // x0, x1, y of the line the window vanishes into
+uniform float progress;
+
+in vec2 v_texcoord;
+layout(location = 0) out vec4 fragColor;
+
+void main() {
+    vec2  P  = v_texcoord * fbSize;
+    float x0 = srcBox.x, x1 = srcBox.x + srcBox.z;
+    float y0 = srcBox.y, y1 = srcBox.y + srcBox.w;
+    float H  = srcBox.w;
+
+    // Measure along the axis from the window's far edge (s = 0) to the target (s = S).
+    float dir  = target.z >= 0.5 * (y0 + y1) ? 1.0 : -1.0;
+    float yFar = dir > 0.0 ? y0 : y1;
+    float S    = max(abs(target.z - yFar), H + 1.0);
+    float s    = (P.y - yFar) * dir;
+
+    if (s < 0.0 || s > S) { fragColor = vec4(0.0); return; }
+
+    float bend  = smoothstep(0.0, 0.40, progress);          // the funnel forms first...
+    float slide = smoothstep(0.08, 1.0, progress);          // ...then the window pours down it
+
+    float f     = smoothstep(0.0, 1.0, s / S);
+    float left  = mix(x0, target.x, f * bend);
+    float right = mix(x1, target.y, f * bend);
+    float width = max(right - left, 0.5);
+    float u     = (P.x - left) / width;
+    if (u < 0.0 || u > 1.0) { fragColor = vec4(0.0); return; }
+
+    float sSrc = s - slide * S;
+    if (sSrc < 0.0 || sSrc > H) { fragColor = vec4(0.0); return; }
+
+    vec2 src = vec2(mix(x0, x1, u), yFar + dir * sSrc);
+    vec4 c   = texture(tex, src / fbSize);
+
+    float side = smoothstep(0.0, 1.5 / width, u) * smoothstep(0.0, 1.5 / width, 1.0 - u);
+    float sink = 1.0 - bend * smoothstep(S - max(0.05 * S, 10.0), S, s);   // dissolve into the target
+    fragColor = c * side * sink;
+}
+)GLSL"},
+
     {"gaussianblur.frag", R"GLSL(
 #version 300 es
 precision highp float;

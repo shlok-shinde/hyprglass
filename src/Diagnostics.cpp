@@ -1,4 +1,5 @@
 #include "Diagnostics.hpp"
+#include "Genie.hpp"
 #include "Globals.hpp"
 #include "GlassSubsurfaceState.hpp"
 #include "ItemHints.hpp"
@@ -476,7 +477,13 @@ void registerHyprCtlCommand(HANDLE handle) {
             if (rest == "items")
                 return formatItems(format);
 
-            return "hyprglass: usage: hyprctl hyprglass <stats [reset]|items>  (add -j for JSON, e.g. hyprctl -j hyprglass items)\n";
+            if (auto genie = Genie::handleHyprctl(rest, format == eHyprCtlOutputFormat::FORMAT_JSON))
+                return *genie;
+
+            return "hyprglass: usage: hyprctl hyprglass <stats [reset]|items|minimize|restore|minimized>\n"
+                   "  minimize [address:0x..] [x y w h] [ms]   pour a window into a target rect (global logical px)\n"
+                   "  restore  [address:0x..] [x y w h] [ms]   bring it back (default: the last one minimized)\n"
+                   "  minimized                                list minimized windows (add -j for JSON)\n";
         },
     });
 }

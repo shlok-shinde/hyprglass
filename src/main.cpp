@@ -1,5 +1,6 @@
 #include "BackgroundDamageObserver.hpp"
 #include "Diagnostics.hpp"
+#include "Genie.hpp"
 #include "GlassDecoration.hpp"
 #include "GlassLayerCompositeElement.hpp"
 #include "GlassLayerPassElement.hpp"
@@ -759,6 +760,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     registerConfig(PHANDLE);
     initConfigPointers(PHANDLE, g_pGlobalState->config);
     Diagnostics::registerHyprCtlCommand(PHANDLE);
+    Genie::init(PHANDLE);
 
     // Shadows must be enabled for the glass effect to sample the correct background.
     // Force-enable if the user has disabled them.
@@ -853,6 +855,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
 
     g_pGlobalState->listeners.clear();
     BackgroundDamageObserver::setEnabled(false);
+    Genie::shutdown();
     Diagnostics::unregisterHyprCtlCommand(PHANDLE);
 
     // drop the redirect and the sink's elements while the plugin is still mapped

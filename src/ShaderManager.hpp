@@ -64,6 +64,13 @@ struct SGlassUniforms {
     GLint fieldSigmaPx = -1;
 };
 
+struct SGenieUniforms {
+    GLint fbSize   = -1;
+    GLint srcBox   = -1;
+    GLint target   = -1;
+    GLint progress = -1;
+};
+
 struct SFieldUniforms {
     GLint direction = -1;
     GLint sigma     = -1;
@@ -96,6 +103,9 @@ class CShaderManager {
     SP<CShader>    fieldShader = makeShared<CShader>();
     SFieldUniforms fieldUniforms;
 
+    SP<CShader>    genieShader = makeShared<CShader>();
+    SGenieUniforms genieUniforms;
+
   private:
     bool m_initialized = false;
 
@@ -103,4 +113,5 @@ class CShaderManager {
     [[nodiscard]] bool compileGlassShader();
     [[nodiscard]] bool compileBlurShader();
     bool compileFieldShader();
+    bool compileGenieShader();
 };
