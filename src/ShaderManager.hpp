@@ -67,6 +67,11 @@ struct SGlassUniforms {
     GLint pressPosPx    = -1;
     GLint pressGlow     = -1;
     GLint pressRadiusPx = -1;
+
+    // Clear / Tinted (plugin:hyprglass:tinted) and the edge highlight scale
+    GLint tinted      = -1;
+    GLint tintedColor = -1;
+    GLint rimLevel    = -1;
 };
 
 struct SGenieUniforms {

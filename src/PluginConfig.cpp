@@ -47,6 +47,12 @@ std::optional<EDebugMode> parseDebugMode(std::string_view value) {
     return std::nullopt;
 }
 
+float tintedAmount() {
+    if (!g_pGlobalState || !g_pGlobalState->config.tinted)
+        return 0.0f;
+    return std::clamp(static_cast<float>(**g_pGlobalState->config.tinted), 0.0f, 1.0f);
+}
+
 EDebugMode currentDebugMode() {
     if (!g_pGlobalState)
         return EDebugMode::OFF;
@@ -58,6 +64,8 @@ void registerConfig(HANDLE handle) {
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::MANAGE_WINDOW_BLUR, Config::INTEGER{1});
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::SKIP_OPAQUE_WINDOWS, Config::INTEGER{1});
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::BLUR_FOLD, Config::INTEGER{1});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::TINTED, Config::FLOAT{0.0});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::EDGE_HIGHLIGHT, Config::FLOAT{1.0});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_THEME, Config::STRING{"dark"});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_PRESET, Config::STRING{"default"});
 
@@ -256,6 +264,8 @@ void initConfigPointers(HANDLE handle, SPluginConfig& config) {
     config.manageWindowBlur  = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::MANAGE_WINDOW_BLUR);
     config.skipOpaqueWindows = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::SKIP_OPAQUE_WINDOWS);
     config.blurFold          = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::BLUR_FOLD);
+    config.tinted            = getStaticPtr<Hyprlang::FLOAT>(handle, ConfigKeys::TINTED);
+    config.edgeHighlight     = getStaticPtr<Hyprlang::FLOAT>(handle, ConfigKeys::EDGE_HIGHLIGHT);
     config.defaultTheme  = getStringPtr(handle, ConfigKeys::DEFAULT_THEME);
     config.defaultPreset = getStringPtr(handle, ConfigKeys::DEFAULT_PRESET);
 

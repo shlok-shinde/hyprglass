@@ -592,6 +592,15 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
 
     uploadThemeUniforms(resolveContext);
 
+    // Clear / Tinted: tinted panes lean toward the theme's own surface colour.
+    glUniform1f(uniforms.tinted, tintedAmount());
+    if (resolveContext.isDark)
+        glUniform3f(uniforms.tintedColor, 0.075f, 0.075f, 0.085f);
+    else
+        glUniform3f(uniforms.tintedColor, 0.93f, 0.93f, 0.95f);
+    const auto& cfg = g_pGlobalState->config;
+    glUniform1f(uniforms.rimLevel, cfg.edgeHighlight ? std::max(static_cast<float>(**cfg.edgeHighlight), 0.0f) : 1.0f);
+
     // Touch light: the press point in this box's own pixels. Rotated/flipped
     // monitors don't get it (rawBox and the box-local frame differ there).
     const auto light = TouchLight::current();

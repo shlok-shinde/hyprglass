@@ -24,7 +24,8 @@ precision highp float;
  * 4. Subtle center dome lens magnification
  * 5. Frosted tint (brightness boost + desaturation)
  * 6. Configurable color tint overlay
- * 7. Rim: an even hairline where the slab ends (no key light, no lit corner)
+ * 7. Rim: a crisp one-pixel edge, nearly invisible unless it has something
+ *    bright to reflect (no key light, no lit corner)
  * 8. Fresnel edge glow (white or tinted by the background)
  * 9. Touch light: lights the glass around a press point, nowhere else
  */
@@ -111,6 +112,13 @@ uniform float fieldSigmaPx;    // sigma the field was blurred with, framebuffer 
 uniform vec2  pressPosPx;
 uniform float pressGlow;
 uniform float pressRadiusPx;
+
+// Clear / Tinted (plugin:hyprglass:tinted): tinted panes lean toward
+// tintedColor, the theme's surface colour (their backdrop is also blurred more).
+uniform float tinted;
+uniform vec3  tintedColor;
+// Scales the rim's edge highlights (plugin:hyprglass:edge_highlight).
+uniform float rimLevel;
 
 in vec2 v_texcoord;
 layout(location = 0) out vec4 fragColor;
@@ -419,6 +427,15 @@ void main() {
 
     color = mix(color, tintColor, tintAlpha);
 
+    // Tinted: more opaque, so what sits on the glass gets more contrast.
+    if (tinted > 0.001)
+        color = mix(color, tintedColor, tinted * 0.62);
+
+    // What the edge reflects: the backdrop just outside it. Bright content
+    // there lights the rim; over a dark backdrop the rim all but disappears.
+    vec3  envC = sampleBlurred(uv + nOut * invFullSize * 5.0 * px).rgb;
+    float env  = smoothstep(0.30, 0.95, dot(envC, vec3(0.2126, 0.7152, 0.0722)));
+
     // ========================================
     // INNER GLOW — light scattered inside the curved rim
     // ========================================
@@ -430,7 +447,7 @@ void main() {
             float maxC = max(max(color.r, color.g), color.b);
             glow = mix(glow, maxC > 0.001 ? color / maxC : vec3(1.0), fresnelTint);
         }
-        color += glow * rimFall * rimFall * fresnelStrength * 0.10;
+        color += glow * rimFall * rimFall * fresnelStrength * 0.10 * (0.3 + 0.7 * env);
     }
 
     // ========================================
@@ -448,21 +465,23 @@ void main() {
     }
 
     // ========================================
-    // RIM — a thin, even hairline the whole way round where the slab ends,
-    // plus a soft band just inside it. No side is brighter than another:
-    // there is no key light. The edge mostly reads through the bezel bending
-    // what is behind it.
+    // RIM — a crisp one-pixel edge where the slab ends, the same on every
+    // side (there is no key light): a quiet line on its own, brighter where
+    // the edge reflects something bright, and where it is touched.
     // ========================================
     if (bevelStrength > 0.001 || touch > 0.001) {
-        float lineW  = max(0.9 * px, 0.75);
-        float line   = exp(-(depthPx * depthPx) / (2.0 * lineW * lineW));
+        float line;
         if (fieldShape) {
-            // The field is too soft to place a hairline: probe the real outline instead.
-            vec2 stepOut = nOut * invFullSize * lineW;
-            line = clamp(1.0 - 0.65 * maskCoverage(uv + stepOut * 1.2) - 0.35 * maskCoverage(uv + stepOut * 2.4), 0.0, 1.0);
+            // the pane's outermost pixel row: inside, with a neighbour outside
+            vec2  o     = invFullSize;
+            float inner = min(min(maskCoverage(uv + vec2(o.x, 0.0)), maskCoverage(uv - vec2(o.x, 0.0))),
+                              min(maskCoverage(uv + vec2(0.0, o.y)), maskCoverage(uv - vec2(0.0, o.y))));
+            line = clamp(coverage - inner, 0.0, 1.0);
+        } else {
+            line = 1.0 - smoothstep(0.0, 1.25, depthPx);
         }
-        float bandW  = max(bevelSize * px, 1.0);
-        float band   = exp(-depthPx / bandW) * 0.28;
+        float bandW = max(bevelSize * px, 1.0);
+        float band  = exp(-depthPx / bandW) * 0.28;   // only the touch light uses it
 
         vec3 rimLight = vec3(1.0);
         if (bevelColorAlpha > 0.001) rimLight = mix(rimLight, bevelColor, bevelColorAlpha);
@@ -470,10 +489,10 @@ void main() {
             float maxC = max(max(color.r, color.g), color.b);
             rimLight = mix(rimLight, maxC > 0.001 ? color / maxC : vec3(1.0), bevelTint);
         }
-        float rim = (line + band) * bevelStrength * 0.55 + (line * 1.6 + band * 3.0) * touch;
+        float rim = line * bevelStrength * rimLevel * (0.42 + 0.58 * env)
+                  + (line * 1.6 + band * 3.0) * touch;
         color = mix(color, rimLight, clamp(rim, 0.0, 1.0));
 
-        // a faint, even shade just inside the band gives the slab its depth
         if (bevelShadow > 0.001)
             color *= 1.0 - bevelShadow * band;
     }

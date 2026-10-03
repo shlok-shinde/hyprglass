@@ -56,6 +56,11 @@ enum class EDebugMode { OFF, HINTS_ONLY, GL_WORK_ONLY };
 // state or an unrecognized value (validateConfig() warns about the latter).
 [[nodiscard]] EDebugMode currentDebugMode();
 
+// plugin:hyprglass:tinted, clamped to 0..1 (0 when unset)
+[[nodiscard]] float tintedAmount();
+// Tinted glass is frostier: every preset's blur is scaled by this.
+[[nodiscard]] inline float tintedBlurScale() { return 1.0f + 1.6f * tintedAmount(); }
+
 namespace ConfigKeys {
 
 // Global-only
@@ -65,6 +70,11 @@ inline constexpr auto DEFAULT_PRESET      = "plugin:hyprglass:default_preset";
 inline constexpr auto MANAGE_WINDOW_BLUR  = "plugin:hyprglass:manage_window_blur";
 inline constexpr auto SKIP_OPAQUE_WINDOWS = "plugin:hyprglass:skip_opaque_windows";
 inline constexpr auto BLUR_FOLD           = "plugin:hyprglass:blur_fold";
+// Tahoe's Clear / Tinted switch: 0 = clear, 1 = fully tinted (more opaque,
+// more frost). Applies on top of every preset.
+inline constexpr auto TINTED              = "plugin:hyprglass:tinted";
+// Scales the rim's edge highlights (0 = none, 1 = as tuned)
+inline constexpr auto EDGE_HIGHLIGHT      = "plugin:hyprglass:edge_highlight";
 
 // Performance diagnostics
 inline constexpr auto DEBUG_MODE   = "plugin:hyprglass:debug:mode";
@@ -311,6 +321,8 @@ struct SPluginConfig {
     Hyprlang::INT* const* blurFold = nullptr;
     StringConfigPtr      defaultTheme;
     StringConfigPtr      defaultPreset;
+    Hyprlang::FLOAT* const* tinted        = nullptr;
+    Hyprlang::FLOAT* const* edgeHighlight = nullptr;
 
     // Performance diagnostics (see Diagnostics.hpp for the hyprctl side)
     StringConfigPtr       debugMode;

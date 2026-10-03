@@ -85,6 +85,9 @@ bool CShaderManager::compileGlassShader() {
     glassUniforms.pressPosPx          = glGetUniformLocation(program, "pressPosPx");
     glassUniforms.pressGlow           = glGetUniformLocation(program, "pressGlow");
     glassUniforms.pressRadiusPx       = glGetUniformLocation(program, "pressRadiusPx");
+    glassUniforms.tinted              = glGetUniformLocation(program, "tinted");
+    glassUniforms.tintedColor         = glGetUniformLocation(program, "tintedColor");
+    glassUniforms.rimLevel            = glGetUniformLocation(program, "rimLevel");
 
     return true;
 }

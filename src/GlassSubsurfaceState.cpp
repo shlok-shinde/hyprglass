@@ -146,7 +146,7 @@ void CGlassSubsurfaceState::sampleAndRedirect(PHLMONITOR monitor, const CBox& tr
         const std::string      preset  = resolvePresetName();
         const SResolveContext  ctx     = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets};
 
-        float blurStrength = resolvePresetFloat(ctx, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength);
+        float blurStrength = resolvePresetFloat(ctx, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength) * tintedBlurScale();
         int   downscale    = blurStrength >= GlassRenderer::BLUR_DOWNSCALE_THRESHOLD ? GlassRenderer::BLUR_DOWNSCALE_MAX : 1;
 
         GlassRenderer::sampleBackground(m_sampleFramebuffer, source, transformBox, m_samplePaddingRatio, downscale);

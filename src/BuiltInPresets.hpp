@@ -192,20 +192,20 @@ inline SCustomPreset makePomme() {
 //   fresnel_strength    light scattered inside the curved rim
 //   specular_strength   how much light a press lets into the glass (specular_angle is ignored)
 
-// Shared by the three tahoe presets: even hairline rim, no key light (the
-// shader has none), and light only where the glass is pressed.
+// Shared by the three tahoe presets: a crisp rim that only shows what it
+// reflects, no key light (the shader has none), light only where pressed.
 inline void applyTahoeBase(SCustomPreset& p) {
     p.shared.blurIterations      = 2;
     p.shared.edgeThickness       = 0.06f;
     p.shared.lensDistortion      = 0.0f;
-    p.shared.fresnelStrength     = 0.35f;
+    p.shared.fresnelStrength     = 0.15f;
     p.shared.fresnelTint         = 0.4f;
     p.shared.fresnelColor        = 0xffffff00;
     p.shared.specularStrength    = 1.0f;    // touch light
     p.shared.bevelStrength       = 0.6f;
     p.shared.bevelSize           = 4.0f;
     p.shared.bevelTint           = 0.2f;
-    p.shared.bevelShadow         = 0.12f;
+    p.shared.bevelShadow         = 0.0f;
     p.shared.glassOpacity        = 1.0f;
 
     p.dark.contrast              = 1.0f;
@@ -281,7 +281,7 @@ inline SCustomPreset makeTahoeWindow() {
     p.shared.refractionStrength  = 1.2f;
     p.shared.chromaticAberration = 0.3f;
     p.shared.edgeThickness       = 0.05f;
-    p.shared.fresnelStrength     = 0.25f;
+    p.shared.fresnelStrength     = 0.12f;
     p.shared.bevelStrength       = 0.75f;
 
     p.dark.brightness            = 0.70f;
