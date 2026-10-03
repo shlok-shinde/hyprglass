@@ -66,6 +66,7 @@ void registerConfig(HANDLE handle) {
     addConfigValue<Config::Values::Int>(handle, ConfigKeys::BLUR_FOLD, Config::INTEGER{1});
     addConfigValue<Config::Values::Float>(handle, ConfigKeys::TINTED, Config::FLOAT{0.0});
     addConfigValue<Config::Values::Float>(handle, ConfigKeys::EDGE_HIGHLIGHT, Config::FLOAT{1.0});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::LENS, Config::FLOAT{1.0});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_THEME, Config::STRING{"dark"});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_PRESET, Config::STRING{"default"});
 
@@ -266,6 +267,7 @@ void initConfigPointers(HANDLE handle, SPluginConfig& config) {
     config.blurFold          = getStaticPtr<Hyprlang::INT>(handle, ConfigKeys::BLUR_FOLD);
     config.tinted            = getStaticPtr<Hyprlang::FLOAT>(handle, ConfigKeys::TINTED);
     config.edgeHighlight     = getStaticPtr<Hyprlang::FLOAT>(handle, ConfigKeys::EDGE_HIGHLIGHT);
+    config.lens              = getStaticPtr<Hyprlang::FLOAT>(handle, ConfigKeys::LENS);
     config.defaultTheme  = getStringPtr(handle, ConfigKeys::DEFAULT_THEME);
     config.defaultPreset = getStringPtr(handle, ConfigKeys::DEFAULT_PRESET);
 

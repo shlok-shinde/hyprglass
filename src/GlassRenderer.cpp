@@ -601,6 +601,16 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     const auto& cfg = g_pGlobalState->config;
     glUniform1f(uniforms.rimLevel, cfg.edgeHighlight ? std::max(static_cast<float>(**cfg.edgeHighlight), 0.0f) : 1.0f);
 
+    // Body lens: how far (px) what is behind a pane is pulled in at its rim.
+    // Grows with the pane, capped. Shell layers that cover the whole monitor
+    // (overview) hold several separate panes: no single lens fits them.
+    float bodyLensPx = lensDistortionValue * std::min(0.14f * minDimensionPx, 130.0f * (monitor ? static_cast<float>(monitor->m_scale) : 1.0f));
+    if (cfg.lens)
+        bodyLensPx *= std::max(static_cast<float>(**cfg.lens), 0.0f);
+    if (mask && monitor && rawBox.w >= 0.9 * monitor->m_pixelSize.x && rawBox.h >= 0.9 * monitor->m_pixelSize.y)
+        bodyLensPx = 0.0f;
+    glUniform1f(uniforms.bodyLensPx, bodyLensPx);
+
     // Touch light: the press point in this box's own pixels. Rotated/flipped
     // monitors don't get it (rawBox and the box-local frame differ there).
     const auto light = TouchLight::current();

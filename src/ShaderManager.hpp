@@ -72,6 +72,7 @@ struct SGlassUniforms {
     GLint tinted      = -1;
     GLint tintedColor = -1;
     GLint rimLevel    = -1;
+    GLint bodyLensPx  = -1;
 };
 
 struct SGenieUniforms {

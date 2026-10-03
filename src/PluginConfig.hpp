@@ -75,6 +75,8 @@ inline constexpr auto BLUR_FOLD           = "plugin:hyprglass:blur_fold";
 inline constexpr auto TINTED              = "plugin:hyprglass:tinted";
 // Scales the rim's edge highlights (0 = none, 1 = as tuned)
 inline constexpr auto EDGE_HIGHLIGHT      = "plugin:hyprglass:edge_highlight";
+// Scales the body lens: refraction across the whole pane (0 = rim only)
+inline constexpr auto LENS                = "plugin:hyprglass:lens";
 
 // Performance diagnostics
 inline constexpr auto DEBUG_MODE   = "plugin:hyprglass:debug:mode";
@@ -323,6 +325,7 @@ struct SPluginConfig {
     StringConfigPtr      defaultPreset;
     Hyprlang::FLOAT* const* tinted        = nullptr;
     Hyprlang::FLOAT* const* edgeHighlight = nullptr;
+    Hyprlang::FLOAT* const* lens          = nullptr;
 
     // Performance diagnostics (see Diagnostics.hpp for the hyprctl side)
     StringConfigPtr       debugMode;

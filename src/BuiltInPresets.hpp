@@ -197,7 +197,7 @@ inline SCustomPreset makePomme() {
 inline void applyTahoeBase(SCustomPreset& p) {
     p.shared.blurIterations      = 2;
     p.shared.edgeThickness       = 0.06f;
-    p.shared.lensDistortion      = 0.0f;
+    p.shared.lensDistortion      = 0.8f;    // body lens: refraction across the whole pane
     p.shared.fresnelStrength     = 0.15f;
     p.shared.fresnelTint         = 0.4f;
     p.shared.fresnelColor        = 0xffffff00;
@@ -205,7 +205,7 @@ inline void applyTahoeBase(SCustomPreset& p) {
     p.shared.bevelStrength       = 0.6f;
     p.shared.bevelSize           = 4.0f;
     p.shared.bevelTint           = 0.2f;
-    p.shared.bevelShadow         = 0.0f;
+    p.shared.bevelShadow         = 0.28f;   // drop shadow under shell panels
     p.shared.glassOpacity        = 1.0f;
 
     p.dark.contrast              = 1.0f;
@@ -234,7 +234,7 @@ inline SCustomPreset makeTahoeClear() {
 
     p.dark.brightness            = 0.80f;
     p.dark.saturation            = 1.10f;
-    p.dark.adaptiveDim           = 0.35f;   // bright backdrops toned down for white text
+    p.dark.adaptiveDim           = 0.80f;   // bright backdrops toned down for white text
     p.dark.tintColor             = 0x0a0a0c40;
 
     p.light.brightness           = 1.02f;
@@ -245,21 +245,23 @@ inline SCustomPreset makeTahoeClear() {
     return p;
 }
 
-// macOS Tahoe "Regular": more frost and tint, for panels that carry text.
+// macOS Tahoe "Regular": the dock's glass with more frost and tint, for panels
+// that carry text (launcher, sidebars, notifications), so they stay readable
+// and stand apart from whatever is behind them.
 inline SCustomPreset makeTahoeRegular() {
     SCustomPreset p;
     p.name = "tahoe";
     applyTahoeBase(p);
 
-    p.shared.blurStrength        = 0.8f;
+    p.shared.blurStrength        = 1.0f;
     p.shared.bevelStrength       = 0.85f;
     p.shared.refractionStrength  = 1.3f;
     p.shared.chromaticAberration = 0.35f;
 
     p.dark.brightness            = 0.70f;
     p.dark.saturation            = 1.10f;
-    p.dark.adaptiveDim           = 0.45f;
-    p.dark.tintColor             = 0x0b0b0e58;
+    p.dark.adaptiveDim           = 0.85f;
+    p.dark.tintColor             = 0x0b0b0e66;
 
     p.light.brightness           = 1.02f;
     p.light.adaptiveDim          = 0.10f;

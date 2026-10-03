@@ -88,6 +88,7 @@ bool CShaderManager::compileGlassShader() {
     glassUniforms.tinted              = glGetUniformLocation(program, "tinted");
     glassUniforms.tintedColor         = glGetUniformLocation(program, "tintedColor");
     glassUniforms.rimLevel            = glGetUniformLocation(program, "rimLevel");
+    glassUniforms.bodyLensPx          = glGetUniformLocation(program, "bodyLensPx");
 
     return true;
 }

@@ -21,7 +21,7 @@ precision highp float;
  *    optionally rim-only) + exponential proximity
  * 2. Chromatic aberration (per-channel refraction scale)
  * 3. Edge raw-texture blend for vivid color pickup
- * 4. Subtle center dome lens magnification
+ * 4. Body lens: the whole pane is a shallow convex lens
  * 5. Frosted tint (brightness boost + desaturation)
  * 6. Configurable color tint overlay
  * 7. Rim: a crisp one-pixel edge, nearly invisible unless it has something
@@ -46,7 +46,8 @@ uniform float invBezelWidthPx; // = 1.0 / (edgeThickness * minDim), hoisted per-
 uniform vec3 tintColor;
 uniform float tintAlpha;
 uniform float lensDistortion;
-uniform float lensMaxPx;       // = lensDistortion * minDim * 0.006, hoisted per-draw
+uniform float lensMaxPx;       // unused (the old dome); see bodyLensPx
+uniform float bodyLensPx;      // body lens: how far (px) the backdrop is pulled in at the rim
 uniform float brightness;
 uniform float contrast;
 uniform float saturation;
@@ -68,7 +69,7 @@ uniform vec3 bevelColor;
 uniform float bevelColorAlpha;
 uniform float bevelTint;
 uniform float bevelAngle;      // unused: the rim has no key light
-uniform float bevelShadow;
+uniform float bevelShadow;     // shell panels: drop shadow just outside their shape
 uniform float specularAngle;   // unused: light only comes from touches
 
 uniform sampler2D maskTex;
@@ -337,8 +338,18 @@ void main() {
             if (!insideRegion) { fragColor = surfacePixel; return; } // premultiplied, output as-is
         } else {
             coverage = smoothstep(maskAlphaThreshold * 0.6, maskAlphaThreshold * 1.4 + 0.004, surfacePixel.a);
-            // Not glass here: hand the shell's own pixel (a drop shadow, say) through untouched.
-            if (coverage < 0.002) { fragColor = surfacePixel; return; }
+            // Not glass here: hand the shell's own pixel through, over a soft
+            // shadow that the pane casts (it is what sets a pane apart from a
+            // bright backdrop). The coverage field reaches a little past the shape.
+            if (coverage < 0.002) {
+                float shadowA = 0.0;
+                if (useField == 1 && bevelShadow > 0.001) {
+                    float f = fieldCoverage(uv - vec2(0.0, 3.0 * max(monitorScale, 0.5)) * invFullSize);
+                    shadowA = bevelShadow * pow(clamp(f * 2.0, 0.0, 1.0), 1.6);
+                }
+                fragColor = surfacePixel + (1.0 - surfacePixel.a) * vec4(0.0, 0.0, 0.0, shadowA);
+                return;
+            }
         }
     }
     bool fieldShape = hasMask && maskMode == 0 && useField == 1;
@@ -390,12 +401,16 @@ void main() {
     float shiftG = refractShiftPx(t, thicknessPx, bezelPx, IOR);
     vec2 offG = nIn * shiftG * invFullSize;
 
-    // subtle dome in the flat interior
+    // BODY LENS — the pane is not flat-topped: it is a shallow convex lens
+    // across its whole face, so the refraction reads everywhere, not only on
+    // the bezel. What is behind is magnified a little at the centre and pulled
+    // in harder toward the rim, where the bezel takes over.
     vec2 domeUV = vec2(0.0);
-    if (lensDistortion > 0.001) {
-        vec2 c = (uv - 0.5) * 2.0;
-        vec2 dGrad = vec2(-4.0 * c.x * (1.0 - c.y * c.y), -4.0 * c.y * (1.0 - c.x * c.x));
-        domeUV = dGrad * lensMaxPx * smoothstep(0.0, 1.0, t) * invFullSize;
+    if (bodyLensPx > 0.01) {
+        vec2  halfBox = max(0.5 * glassBoxSizePx, vec2(1.0));
+        vec2  q       = (uv * fullSize - glassBoxOffsetPx - halfBox) / halfBox;   // -1..1 across the pane
+        float r2      = clamp(0.5 * dot(q, q), 0.0, 1.0);
+        domeUV = -q * bodyLensPx * (0.45 + 0.55 * r2) * materialize * invFullSize;
     }
 
     vec3 color;
@@ -415,8 +430,13 @@ void main() {
     float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(lum), color, saturation);
 
+    // Adaptive tone: a bright backdrop is pulled down toward a ceiling, so the
+    // shell's white text stays readable on any wallpaper or window; a dark one
+    // is left as it is. adaptive_dim = how hard (1 = flat at the ceiling).
+    const float CEILING = 0.30;
     float lumCurve = smoothstep(0.25, 0.55, lum);
-    color *= brightness * (1.0 - adaptiveDim * lumCurve);
+    float toned    = lum - max(lum - CEILING, 0.0) * adaptiveDim;
+    color *= brightness * (lum > 1e-4 ? toned / lum : 1.0);
     color += vec3(adaptiveBoost * (1.0 - lumCurve) * 0.5);
     color = mix(vec3(0.5), color, contrast);
 
@@ -492,9 +512,6 @@ void main() {
         float rim = line * bevelStrength * rimLevel * (0.42 + 0.58 * env)
                   + (line * 1.6 + band * 3.0) * touch;
         color = mix(color, rimLight, clamp(rim, 0.0, 1.0));
-
-        if (bevelShadow > 0.001)
-            color *= 1.0 - bevelShadow * band;
     }
 
     // the pressed spot fills with soft light (a small control fills entirely)

@@ -20,6 +20,9 @@
 #include <hyprland/src/desktop/Workspace.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
 #include <hyprland/src/state/WorkspaceState.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
+#include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
@@ -343,6 +346,37 @@ static bool shouldGlassLayer(PHLLS layerSurface) {
         return true;
 
     return include.contains(ns);
+}
+
+// The shell's Liquid glass settings (tinted, edge_highlight, lens) arrive
+// through `hyprctl eval`, which changes values without a config reload and
+// without repainting anything. Watch them and repaint, resampling the
+// backdrop (tinted changes the blur), whenever one changes.
+static SP<CEventLoopTimer>  s_settingsWatch;
+static std::array<float, 3> s_lastSettings{-1.f, -1.f, -1.f};
+
+static void watchSettings() {
+    if (!g_pGlobalState)
+        return;
+    const auto& config = g_pGlobalState->config;
+    const std::array<float, 3> now{
+        tintedAmount(),
+        config.edgeHighlight ? static_cast<float>(**config.edgeHighlight) : 1.f,
+        config.lens ? static_cast<float>(**config.lens) : 1.f,
+    };
+    if (now != s_lastSettings) {
+        if (s_lastSettings[0] >= 0.f) {
+            for (const auto& decoration : g_pGlobalState->decorations)
+                if (auto* deco = decoration.get())
+                    deco->markBackgroundDirty();
+            for (const auto& monitor : State::monitorState()->monitors()) {
+                g_pGlobalState->bumpSceneGeneration(monitor);
+                g_pHyprRenderer->damageMonitor(monitor);
+            }
+        }
+        s_lastSettings = now;
+    }
+    s_settingsWatch->updateTimeout(std::chrono::milliseconds(200));
 }
 
 bool layerHasGlass(PHLLS layerSurface) {
@@ -768,6 +802,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     Diagnostics::registerHyprCtlCommand(PHANDLE);
     Genie::init(PHANDLE);
     TouchLight::init();
+    s_settingsWatch = makeShared<CEventLoopTimer>(std::chrono::milliseconds(200), [](SP<CEventLoopTimer>, void*) { watchSettings(); }, nullptr);
+    g_pEventLoopManager->addTimer(s_settingsWatch);
 
     // Shadows must be enabled for the glass effect to sample the correct background.
     // Force-enable if the user has disabled them.
@@ -864,6 +900,10 @@ APICALL EXPORT void PLUGIN_EXIT() {
     BackgroundDamageObserver::setEnabled(false);
     Genie::shutdown();
     TouchLight::shutdown();
+    if (s_settingsWatch) {
+        g_pEventLoopManager->removeTimer(s_settingsWatch);
+        s_settingsWatch.reset();
+    }
     Diagnostics::unregisterHyprCtlCommand(PHANDLE);
 
     // drop the redirect and the sink's elements while the plugin is still mapped
