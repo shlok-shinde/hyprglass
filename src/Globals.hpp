@@ -169,6 +169,9 @@ inline std::unique_ptr<SGlobalState> g_pGlobalState;
 // Decoration registered for this window, or nullptr. Borrowed, never owned.
 CGlassDecoration* glassDecorationFor(const PHLWINDOW& window);
 
+// Whether this layer surface gets glass (layers enabled and its namespace selected).
+bool layerHasGlass(PHLLS layerSurface);
+
 inline constexpr std::string_view PLUGIN_NAME        = "hyprglass";
 inline constexpr std::string_view PLUGIN_DESCRIPTION = "Apple-style Liquid Glass effect";
 inline constexpr std::string_view PLUGIN_AUTHOR      = "Hyprnux";

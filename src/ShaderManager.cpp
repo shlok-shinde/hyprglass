@@ -82,6 +82,9 @@ bool CShaderManager::compileGlassShader() {
     glassUniforms.fieldUVOffset       = glGetUniformLocation(program, "fieldUVOffset");
     glassUniforms.fieldUVScale        = glGetUniformLocation(program, "fieldUVScale");
     glassUniforms.fieldSigmaPx        = glGetUniformLocation(program, "fieldSigmaPx");
+    glassUniforms.pressPosPx          = glGetUniformLocation(program, "pressPosPx");
+    glassUniforms.pressGlow           = glGetUniformLocation(program, "pressGlow");
+    glassUniforms.pressRadiusPx       = glGetUniformLocation(program, "pressRadiusPx");
 
     return true;
 }

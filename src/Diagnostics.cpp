@@ -1,5 +1,6 @@
 #include "Diagnostics.hpp"
 #include "Genie.hpp"
+#include "Touch.hpp"
 #include "Globals.hpp"
 #include "GlassSubsurfaceState.hpp"
 #include "ItemHints.hpp"
@@ -480,10 +481,14 @@ void registerHyprCtlCommand(HANDLE handle) {
             if (auto genie = Genie::handleHyprctl(rest, format == eHyprCtlOutputFormat::FORMAT_JSON))
                 return *genie;
 
-            return "hyprglass: usage: hyprctl hyprglass <stats [reset]|items|minimize|restore|minimized>\n"
+            if (auto touch = TouchLight::handleHyprctl(rest, format == eHyprCtlOutputFormat::FORMAT_JSON))
+                return *touch;
+
+            return "hyprglass: usage: hyprctl hyprglass <stats [reset]|items|minimize|restore|minimized|touch>\n"
                    "  minimize [address:0x..] [x y w h] [ms]   pour a window into a target rect (global logical px)\n"
                    "  restore  [address:0x..] [x y w h] [ms]   bring it back (default: the last one minimized)\n"
-                   "  minimized                                list minimized windows (add -j for JSON)\n";
+                   "  minimized                                list minimized windows (add -j for JSON)\n"
+                   "  touch X Y [hold_ms] | touch-hold X Y | touch-release | touch-probe X Y   light the glass as if pressed there\n";
         },
     });
 }

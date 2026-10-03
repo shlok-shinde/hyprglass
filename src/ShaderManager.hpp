@@ -62,6 +62,11 @@ struct SGlassUniforms {
     GLint fieldUVOffset = -1;
     GLint fieldUVScale = -1;
     GLint fieldSigmaPx = -1;
+
+    // Touch light (Touch.hpp): where the glass is being pressed, box-local px.
+    GLint pressPosPx    = -1;
+    GLint pressGlow     = -1;
+    GLint pressRadiusPx = -1;
 };
 
 struct SGenieUniforms {

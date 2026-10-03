@@ -2,6 +2,7 @@
 #include "BuiltInPresets.hpp"
 #include "Diagnostics.hpp"
 #include "Globals.hpp"
+#include "Touch.hpp"
 
 #include <algorithm>
 #include <array>
@@ -590,6 +591,17 @@ void applyGlassEffect(SP<Render::IFramebuffer> sampleFramebuffer, SP<Render::IFr
     glUniform1f(uniforms.monitorScale, monitor && monitor->m_scale > 0.0f ? monitor->m_scale : 1.0f);
 
     uploadThemeUniforms(resolveContext);
+
+    // Touch light: the press point in this box's own pixels. Rotated/flipped
+    // monitors don't get it (rawBox and the box-local frame differ there).
+    const auto light = TouchLight::current();
+    if (light.strength > 0.f && monitor && monitor->m_transform == WL_OUTPUT_TRANSFORM_NORMAL) {
+        const Vector2D local = (light.posGlobal - monitor->m_position) * monitor->m_scale;
+        glUniform2f(uniforms.pressPosPx, static_cast<float>(local.x - rawBox.x), static_cast<float>(local.y - rawBox.y));
+        glUniform1f(uniforms.pressGlow, light.strength);
+        glUniform1f(uniforms.pressRadiusPx, light.radius * monitor->m_scale);
+    } else
+        glUniform1f(uniforms.pressGlow, 0.0f);
 
     const int64_t tintColorValue = resolvePresetInt(resolveContext, &SPresetValues::tintColor, &SOverridableConfig::tintColor);
     glUniform3f(uniforms.tintColor,

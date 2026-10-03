@@ -188,48 +188,56 @@ inline SCustomPreset makePomme() {
 //   edge_thickness      bezel width, 0.06 = 24 logical px (capped at half the pane)
 //   refraction_strength glass thickness relative to the bezel width (1 = as thick as wide)
 //   chromatic_aberration dispersion of the refractive index across R/G/B
-//   bevel_*             the hairline rim light and its soft inner band
+//   bevel_*             the even hairline rim and its soft inner band (bevel_angle is ignored)
 //   fresnel_strength    light scattered inside the curved rim
+//   specular_strength   how much light a press lets into the glass (specular_angle is ignored)
 
-// macOS Tahoe "Clear". Matches Apple's own close-ups: the interior stays sharp,
-// the bezel lenses hard, and over a dark backdrop the pane reads LIGHTER than
-// what is behind it (scattered light, bright rims), not smoked.
-inline SCustomPreset makeTahoeClear() {
-    SCustomPreset p;
-    p.name = "tahoe_clear";
-
-    p.shared.blurStrength        = 0.16f;
+// Shared by the three tahoe presets: even hairline rim, no key light (the
+// shader has none), and light only where the glass is pressed.
+inline void applyTahoeBase(SCustomPreset& p) {
     p.shared.blurIterations      = 2;
-    p.shared.refractionStrength  = 1.8f;
-    p.shared.chromaticAberration = 0.6f;
     p.shared.edgeThickness       = 0.06f;
     p.shared.lensDistortion      = 0.0f;
-    p.shared.fresnelStrength     = 0.75f;
+    p.shared.fresnelStrength     = 0.35f;
     p.shared.fresnelTint         = 0.4f;
     p.shared.fresnelColor        = 0xffffff00;
-    p.shared.specularStrength    = 0.5f;
-    p.shared.specularAngle       = 315.0f;
-    p.shared.bevelStrength       = 0.9f;
-    p.shared.bevelSize           = 5.0f;
-    p.shared.bevelTint           = 0.15f;
-    p.shared.bevelAngle          = 315.0f;
-    p.shared.bevelShadow         = 0.15f;
+    p.shared.specularStrength    = 1.0f;    // touch light
+    p.shared.bevelStrength       = 0.6f;
+    p.shared.bevelSize           = 4.0f;
+    p.shared.bevelTint           = 0.2f;
+    p.shared.bevelShadow         = 0.12f;
     p.shared.glassOpacity        = 1.0f;
 
-    p.dark.brightness            = 1.0f;
     p.dark.contrast              = 1.0f;
-    p.dark.saturation            = 1.05f;
     p.dark.vibrancy              = 0.15f;
     p.dark.vibrancyDarkness      = 0.0f;
-    p.dark.adaptiveDim           = 0.35f;   // bright backdrops are toned down for white text...
-    p.dark.adaptiveBoost         = 0.16f;   // ...dark ones get the milky lift
-    p.dark.tintColor             = 0xffffff12;
+    p.dark.adaptiveBoost         = 0.0f;    // dark mode never lifts the backdrop
 
-    p.light.brightness           = 1.02f;
     p.light.contrast             = 1.0f;
     p.light.saturation           = 1.05f;
     p.light.vibrancy             = 0.12f;
     p.light.vibrancyDarkness     = 0.0f;
+}
+
+// macOS Tahoe "Clear", for chrome over content (bar, dock). Interior stays
+// sharp, the bezel lenses hard. In dark mode it is smoked: what is behind
+// shows through a little darker, like Tahoe's dark-tint dock and widgets.
+inline SCustomPreset makeTahoeClear() {
+    SCustomPreset p;
+    p.name = "tahoe_clear";
+    applyTahoeBase(p);
+
+    p.shared.blurStrength        = 0.2f;
+    p.shared.refractionStrength  = 1.8f;
+    p.shared.chromaticAberration = 0.5f;
+    p.shared.bevelStrength       = 0.75f;
+
+    p.dark.brightness            = 0.80f;
+    p.dark.saturation            = 1.10f;
+    p.dark.adaptiveDim           = 0.35f;   // bright backdrops toned down for white text
+    p.dark.tintColor             = 0x0a0a0c40;
+
+    p.light.brightness           = 1.02f;
     p.light.adaptiveDim          = 0.10f;
     p.light.adaptiveBoost        = 0.25f;
     p.light.tintColor            = 0xffffff30;
@@ -237,21 +245,54 @@ inline SCustomPreset makeTahoeClear() {
     return p;
 }
 
-// macOS Tahoe "Regular": more frost and tint, for panes that carry text.
+// macOS Tahoe "Regular": more frost and tint, for panels that carry text.
 inline SCustomPreset makeTahoeRegular() {
-    SCustomPreset p = makeTahoeClear();
+    SCustomPreset p;
     p.name = "tahoe";
+    applyTahoeBase(p);
 
-    p.shared.blurStrength        = 0.9f;
-    p.shared.blurIterations      = 2;
+    p.shared.blurStrength        = 0.8f;
+    p.shared.bevelStrength       = 0.85f;
     p.shared.refractionStrength  = 1.3f;
-    p.shared.chromaticAberration = 0.4f;
+    p.shared.chromaticAberration = 0.35f;
 
-    p.dark.brightness            = 0.72f;
+    p.dark.brightness            = 0.70f;
+    p.dark.saturation            = 1.10f;
     p.dark.adaptiveDim           = 0.45f;
-    p.dark.tintColor             = 0x0a0a0a66;
+    p.dark.tintColor             = 0x0b0b0e58;
 
+    p.light.brightness           = 1.02f;
+    p.light.adaptiveDim          = 0.10f;
+    p.light.adaptiveBoost        = 0.25f;
     p.light.tintColor            = 0xffffff70;
+
+    return p;
+}
+
+// App windows (terminal, file manager): frosted enough that text on a
+// see-through background stays readable, still lensing at the rim.
+inline SCustomPreset makeTahoeWindow() {
+    SCustomPreset p;
+    p.name = "tahoe_window";
+    applyTahoeBase(p);
+
+    p.shared.blurStrength        = 1.2f;
+    p.shared.blurIterations      = 3;
+    p.shared.refractionStrength  = 1.2f;
+    p.shared.chromaticAberration = 0.3f;
+    p.shared.edgeThickness       = 0.05f;
+    p.shared.fresnelStrength     = 0.25f;
+    p.shared.bevelStrength       = 0.75f;
+
+    p.dark.brightness            = 0.70f;
+    p.dark.saturation            = 1.10f;
+    p.dark.adaptiveDim           = 0.50f;
+    p.dark.tintColor             = 0x0c0c0f58;
+
+    p.light.brightness           = 1.0f;
+    p.light.adaptiveDim          = 0.10f;
+    p.light.adaptiveBoost        = 0.30f;
+    p.light.tintColor            = 0xf5f5f7a0;
 
     return p;
 }
@@ -268,6 +309,7 @@ inline std::unordered_map<std::string, SCustomPreset> getAll() {
     add(makePomme());
     add(makeTahoeClear());
     add(makeTahoeRegular());
+    add(makeTahoeWindow());
 
     return presets;
 }

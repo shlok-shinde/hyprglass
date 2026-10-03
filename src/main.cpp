@@ -1,6 +1,7 @@
 #include "BackgroundDamageObserver.hpp"
 #include "Diagnostics.hpp"
 #include "Genie.hpp"
+#include "Touch.hpp"
 #include "GlassDecoration.hpp"
 #include "GlassLayerCompositeElement.hpp"
 #include "GlassLayerPassElement.hpp"
@@ -342,6 +343,11 @@ static bool shouldGlassLayer(PHLLS layerSurface) {
         return true;
 
     return include.contains(ns);
+}
+
+bool layerHasGlass(PHLLS layerSurface) {
+    const auto& config = g_pGlobalState->config;
+    return config.layersEnabled && **config.layersEnabled && shouldGlassLayer(layerSurface);
 }
 
 // Makes shouldBlur(PHLLS) return false for one renderLayer() call by mutating the
@@ -761,6 +767,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     initConfigPointers(PHANDLE, g_pGlobalState->config);
     Diagnostics::registerHyprCtlCommand(PHANDLE);
     Genie::init(PHANDLE);
+    TouchLight::init();
 
     // Shadows must be enabled for the glass effect to sample the correct background.
     // Force-enable if the user has disabled them.
@@ -856,6 +863,7 @@ APICALL EXPORT void PLUGIN_EXIT() {
     g_pGlobalState->listeners.clear();
     BackgroundDamageObserver::setEnabled(false);
     Genie::shutdown();
+    TouchLight::shutdown();
     Diagnostics::unregisterHyprCtlCommand(PHANDLE);
 
     // drop the redirect and the sink's elements while the plugin is still mapped

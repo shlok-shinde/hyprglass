@@ -24,10 +24,9 @@ precision highp float;
  * 4. Subtle center dome lens magnification
  * 5. Frosted tint (brightness boost + desaturation)
  * 6. Configurable color tint overlay
- * 7. Bevel (thin lit line at the edge)
+ * 7. Rim: an even hairline where the slab ends (no key light, no lit corner)
  * 8. Fresnel edge glow (white or tinted by the background)
- * 9. Specular highlight (top)
- * 10. Inner shadow (bottom rim)
+ * 9. Touch light: lights the glass around a press point, nowhere else
  */
 
 uniform sampler2D tex;
@@ -67,9 +66,9 @@ uniform float fresnelColorAlpha;
 uniform vec3 bevelColor;
 uniform float bevelColorAlpha;
 uniform float bevelTint;
-uniform float bevelAngle;
+uniform float bevelAngle;      // unused: the rim has no key light
 uniform float bevelShadow;
-uniform float specularAngle;
+uniform float specularAngle;   // unused: light only comes from touches
 
 uniform sampler2D maskTex;
 uniform int useMask;
@@ -106,6 +105,12 @@ uniform int   useField;
 uniform vec2  fieldUVOffset;   // box UV -> field texture UV
 uniform vec2  fieldUVScale;
 uniform float fieldSigmaPx;    // sigma the field was blurred with, framebuffer px
+
+// Touch light (Touch.hpp). The material has no light source of its own; light
+// enters where it is pressed. Box-local framebuffer px; pressGlow 0 = none.
+uniform vec2  pressPosPx;
+uniform float pressGlow;
+uniform float pressRadiusPx;
 
 in vec2 v_texcoord;
 layout(location = 0) out vec4 fragColor;
@@ -243,16 +248,6 @@ vec2 fieldInwardNormal(vec2 uv) {
     float len = length(g);
     // fade out, rather than snap to zero, where the field goes flat
     return len > 1e-7 ? (g / len) * smoothstep(0.0, 0.002, len) : vec2(0.0);
-}
-
-// ============================================================================
-// LIGHT
-// ============================================================================
-
-// light direction for a clockwise angle in degrees, 0 = from the top (screen y grows downward)
-vec2 lightDir(float angleDeg) {
-    float a = radians(angleDeg);
-    return vec2(sin(a), -cos(a));
 }
 
 // ============================================================================
@@ -439,18 +434,26 @@ void main() {
     }
 
     // ========================================
-    // RIM LIGHT — a hairline that is brightest where the outline faces the key
-    // light and, weaker, on the opposite side where that light leaves the slab.
-    // The two flanks in between stay nearly dark, which is what gives the
-    // material its characteristic diagonal sparkle.
+    // TOUCH LIGHT — where the glass is pressed, light gets into it: every rim
+    // within reach of the press point catches it, and small controls glow
+    // through. specular_strength scales it.
     // ========================================
-    if (bevelStrength > 0.001) {
-        vec2  L      = lightDir(bevelAngle);
-        float ndl    = dot(nOut, L);
-        float lit    = pow(max(ndl, 0.0), 1.6);
-        float back   = pow(max(-ndl, 0.0), 2.4) * 0.6;
-        float facing = clamp(lit + back + 0.10, 0.0, 1.0);
+    float touch = 0.0;   // reaches the rims of everything nearby
+    float spot  = 0.0;   // the glow right under the press
+    if (pressGlow > 0.001) {
+        vec2  dp = uv * fullSize - pressPosPx;
+        float r2 = dot(dp, dp) / max(pressRadiusPx * pressRadiusPx, 1.0);
+        touch = pressGlow * specularStrength * exp(-2.0 * r2);
+        spot  = pressGlow * specularStrength * exp(-5.0 * r2);
+    }
 
+    // ========================================
+    // RIM — a thin, even hairline the whole way round where the slab ends,
+    // plus a soft band just inside it. No side is brighter than another:
+    // there is no key light. The edge mostly reads through the bezel bending
+    // what is behind it.
+    // ========================================
+    if (bevelStrength > 0.001 || touch > 0.001) {
         float lineW  = max(0.9 * px, 0.75);
         float line   = exp(-(depthPx * depthPx) / (2.0 * lineW * lineW));
         if (fieldShape) {
@@ -467,21 +470,17 @@ void main() {
             float maxC = max(max(color.r, color.g), color.b);
             rimLight = mix(rimLight, maxC > 0.001 ? color / maxC : vec3(1.0), bevelTint);
         }
-        color = mix(color, rimLight, clamp((line + band) * facing * bevelStrength, 0.0, 1.0));
+        float rim = (line + band) * bevelStrength * 0.55 + (line * 1.6 + band * 3.0) * touch;
+        color = mix(color, rimLight, clamp(rim, 0.0, 1.0));
 
-        // the unlit flanks read slightly darker than the pane
+        // a faint, even shade just inside the band gives the slab its depth
         if (bevelShadow > 0.001)
-            color *= 1.0 - bevelShadow * band * 1.6 * (1.0 - clamp(lit + back, 0.0, 1.0));
+            color *= 1.0 - bevelShadow * band;
     }
 
-    // ========================================
-    // SHEEN — broad, soft light across the bezel on the lit side
-    // ========================================
-    if (specularStrength > 0.001) {
-        vec2  L     = lightDir(specularAngle);
-        float specT = clamp(0.5 + dot(uv - 0.5, L), 0.0, 1.0);
-        color += vec3(1.0, 0.99, 0.97) * specT * specT * rimFall * specularStrength * 0.10;
-    }
+    // the pressed spot fills with soft light (a small control fills entirely)
+    if (spot > 0.001)
+        color += vec3(1.0) * spot * 0.16;
 
     color = clamp(color, 0.0, 1.0);
     float glassA = clamp(glassOpacity * cornerAlpha * coverage, 0.0, 1.0);
