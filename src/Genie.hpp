@@ -28,8 +28,9 @@ void shutdown();
 // a transformed window renders into has no desktop behind it to sample.
 [[nodiscard]] bool isAnimating(const PHLWINDOW& window);
 
-// `hyprctl hyprglass minimize|restore|minimized ...`. nullopt when `request`
-// is not a genie command.
+// `hyprctl hyprglass minimize|restore|minimized|launch ...`. nullopt when
+// `request` is not a genie command. `launch <class[,class...]> x y w h` makes
+// the next window of that app open out of the rect (its dock icon).
 [[nodiscard]] std::optional<std::string> handleHyprctl(std::string_view request, bool json);
 
 } // namespace Genie

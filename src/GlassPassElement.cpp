@@ -26,7 +26,7 @@ std::vector<UP<IPassElement>> CGlassPassElement::draw() {
     if (!m_data.decoration->isCurrentGlassPass(m_data.frameSerial, m_data.queueIndex))
         return {};
 
-    m_data.decoration->renderPass(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha);
+    m_data.decoration->renderPass(g_pHyprRenderer->m_renderData.pMonitor.lock(), m_data.alpha, m_data.sampleOnly);
 
     return {};
 }

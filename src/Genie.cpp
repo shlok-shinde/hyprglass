@@ -5,6 +5,7 @@
 #include <array>
 #include <charconv>
 #include <chrono>
+#include <cctype>
 #include <cmath>
 #include <format>
 #include <GLES3/gl32.h>
@@ -13,6 +14,7 @@
 #include <hyprland/src/desktop/state/WindowState.hpp>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/output/Monitor.hpp>
@@ -224,6 +226,20 @@ namespace {
     std::vector<SMinimized> s_minimized;
     HANDLE                  s_handle = nullptr;
 
+    // An app started from its dock icon: its first window comes out of the icon.
+    struct SLaunch {
+        std::vector<std::string> classes; // lowercase; any of them matches
+        CBox                     origin;
+        Clock::time_point        deadline;
+    };
+    std::vector<SLaunch> s_launches;
+    constexpr float      LAUNCH_TIMEOUT_MS = 10000.0f;
+
+    std::string lowercase(std::string text) {
+        std::ranges::transform(text, text.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return text;
+    }
+
     CBox defaultTarget(const PHLMONITOR& monitor) {
         const double size = 56.0;
         return CBox{monitor->m_position.x + (monitor->m_size.x - size) * 0.5, monitor->m_position.y + monitor->m_size.y - size - 10.0, size, size};
@@ -357,6 +373,67 @@ namespace {
         return "ok";
     }
 
+    // "launch <class[,class...]> x y w h [timeout_ms]": the next window of that
+    // app to open comes out of the rect instead of popping in.
+    std::string expectLaunch(std::string_view args) {
+        std::istringstream stream{std::string(args)};
+        std::string        classes, token;
+        std::vector<float> numbers;
+        stream >> classes;
+        while (stream >> token) {
+            try {
+                numbers.push_back(std::stof(token));
+            } catch (...) { numbers.clear(); break; }
+        }
+        if (classes.empty() || numbers.size() < 4)
+            return "usage: launch <class[,class...]> x y w h [timeout_ms]";
+
+        SLaunch launch;
+        std::istringstream list{classes};
+        while (std::getline(list, token, ','))
+            if (!token.empty())
+                launch.classes.push_back(lowercase(token));
+        launch.origin   = CBox{numbers[0], numbers[1], numbers[2], numbers[3]};
+        launch.deadline = Clock::now() + std::chrono::milliseconds(static_cast<int>(numbers.size() >= 5 ? numbers[4] : LAUNCH_TIMEOUT_MS));
+
+        // a newer click on the same app replaces the one still waiting
+        std::erase_if(s_launches, [&](const SLaunch& pending) {
+            return std::ranges::any_of(pending.classes, [&](const std::string& c) { return std::ranges::find(launch.classes, c) != launch.classes.end(); });
+        });
+        s_launches.push_back(std::move(launch));
+        return "ok";
+    }
+
+    // window.openLate: Hyprland has placed the window and set up its pop-in.
+    void onWindowOpened(PHLWINDOW window) {
+        const auto now = Clock::now();
+        std::erase_if(s_launches, [&](const SLaunch& pending) { return pending.deadline < now; });
+        if (s_launches.empty() || !window || !window->m_isMapped)
+            return;
+
+        const auto windowClass  = lowercase(window->m_class);
+        const auto initialClass = lowercase(window->m_initialClass);
+        auto       it           = std::ranges::find_if(s_launches, [&](const SLaunch& pending) {
+            return std::ranges::any_of(pending.classes, [&](const std::string& c) { return c == windowClass || c == initialClass; });
+        });
+        if (it == s_launches.end())
+            return;
+
+        const CBox origin = it->origin;
+        s_launches.erase(it);
+
+        // opened somewhere out of sight (a rule sent it to another workspace): nothing to watch
+        if (animationFor(window) || window->isHidden() || !window->m_workspace || !window->m_workspace->isVisible())
+            return;
+
+        // The lamp replaces the pop-in: the window is at its place and size, fully
+        // there, from the first frame, and the warp does the rest.
+        window->positionAnimation()->warp();
+        window->sizeAnimation()->warp();
+        window->alpha(Desktop::View::WINDOW_ALPHA_FADE)->warp();
+        attach(window, false, origin, RESTORE_MS);
+    }
+
     PHLWINDOW windowByAddress(std::string_view text) {
         if (text.starts_with("address:"))
             text.remove_prefix(8);
@@ -448,6 +525,7 @@ void init(HANDLE handle) {
     HyprlandAPI::addLuaFunction(handle, "hyprglass", "minimize", luaMinimize);
     HyprlandAPI::addLuaFunction(handle, "hyprglass", "restore", luaRestore);
     HyprlandAPI::addLuaFunction(handle, "hyprglass", "toggle_minimize", luaToggle);
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.window.openLate.listen([](PHLWINDOW window) { onWindowOpened(window); }));
 }
 
 void shutdown() {
@@ -459,6 +537,7 @@ void shutdown() {
     }
     s_animations.clear();
     s_minimized.clear();
+    s_launches.clear();
     if (s_tick) {
         g_pEventLoopManager->removeTimer(s_tick);
         s_tick.reset();
@@ -518,6 +597,9 @@ std::optional<std::string> handleHyprctl(std::string_view request, bool json) {
         }
         return json ? out + "]\n" : (out.empty() ? "none\n" : out);
     }
+
+    if (takeWord("launch"))
+        return expectLaunch(request) + "\n";
 
     const bool wantsMinimize = takeWord("minimize");
     const bool wantsRestore  = !wantsMinimize && takeWord("restore");

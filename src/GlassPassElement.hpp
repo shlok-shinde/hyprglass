@@ -16,6 +16,9 @@ class CGlassPassElement : public IPassElement {
         // Stamped in CGlassDecoration::queueGlassPass. 0 = pass we do not de-duplicate.
         uint64_t             frameSerial = 0;
         uint32_t             queueIndex  = 0;
+        // Only take the backdrop into the decoration's cache, draw nothing
+        // (a window opening out of the genie, see queueGlassPass).
+        bool                 sampleOnly  = false;
     };
 
     explicit CGlassPassElement(const SGlassPassData& data);

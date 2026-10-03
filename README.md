@@ -11,7 +11,8 @@
 > - **touch light**: pressing glass lights it from the press point, and nearby glass catches it
 > - **readable glass**: bright backdrops are pulled toward a luminance ceiling; shell panels cast a
 >   soft shadow
-> - **magic lamp** (genie) minimize and restore as a window transformer (`hyprctl hyprglass minimize`)
+> - **magic lamp** (genie) minimize and restore as a window transformer (`hyprctl hyprglass minimize`),
+>   and windows that open out of their dock icon (`hyprctl hyprglass launch`)
 > - presets `tahoe_clear`, `tahoe`, `tahoe_window`, and the global settings `tinted`,
 >   `edge_highlight` and `lens`
 >

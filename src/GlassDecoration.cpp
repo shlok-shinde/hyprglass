@@ -196,9 +196,17 @@ void CGlassDecoration::queueGlassPass(float alpha) {
     // The genie is the exception: the glass has to travel with the window into
     // the lamp, and it draws from its cached backdrop meanwhile (see
     // wantsBackgroundResample), so it joins the redirected pass.
-    if (Genie::isAnimating(m_window.lock()))
+    if (Genie::isAnimating(m_window.lock())) {
+        // A window opening out of the lamp has no backdrop cached yet. Take it
+        // now, from the real framebuffer under the window's place: this element
+        // bypasses the redirect and runs before the transformed copy is drawn.
+        if (!m_hasCachedSample && managed) {
+            CGlassPassElement::SGlassPassData prime{m_self, alpha};
+            prime.sampleOnly = true;
+            g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassPassElement>(prime));
+        }
         g_pHyprRenderer->addPassElement(makeUnique<CGlassPassElement>(data));
-    else
+    } else
         g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassPassElement>(data));
 }
 
@@ -348,7 +356,7 @@ bool CGlassDecoration::wantsBackgroundResample(PHLMONITOR monitor, const CBox& t
     return false;
 }
 
-void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha) {
+void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool sampleOnly) {
     // Belt and braces: draw() already refuses to queue a pass element for a foreign
     // render, but a caller that reaches renderPass() during one anyway must not sample
     // the foreign framebuffer into this decoration's persistent background cache.
@@ -370,6 +378,13 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha) {
     const auto source = g_pHyprRenderer->m_renderData.currentFB;
     if (!source)
         return;
+
+    // Mid-genie the redirected copy has nothing behind it to sample. Without a
+    // backdrop from before (the prime above did not get one yet), no glass.
+    if (!sampleOnly && Genie::isAnimating(window) && !m_hasCachedSample) {
+        damageEntire();
+        return;
+    }
 
     auto optBox = WindowGeometry::computeWindowBox(window, monitor);
     if (!optBox)
@@ -468,6 +483,9 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha) {
             return;
         }
     }
+
+    if (sampleOnly)
+        return;
 
     GlassRenderer::applyGlassEffect(m_sampleFramebuffer, source,
                                      windowBox, transformBox, glassAlpha,

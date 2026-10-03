@@ -25,7 +25,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     [[nodiscard]] std::string                getDisplayName() override;
 
     [[nodiscard]] PHLWINDOW getOwner();
-    void                    renderPass(PHLMONITOR monitor, const float& alpha);
+    void                    renderPass(PHLMONITOR monitor, const float& alpha, bool sampleOnly = false);
     void                    onFullscreenStateChanged();
 
     // Content below committed damage in our sample region — resample next frame.
