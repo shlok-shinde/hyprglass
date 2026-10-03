@@ -1,5 +1,24 @@
 # HyprGlass - Liquid Glass inspired plugin for Hyprland
 
+> **This is the `nothing-liquid` fork** of [hyprnux/hyprglass](https://github.com/hyprnux/hyprglass),
+> made for the Nothing Liquid rice (end-4's illogical-impulse shell). On top of upstream v0.9.0 it adds:
+>
+> - **optics**: a squircle bezel with Snell refraction (n = 1.5) and per-channel dispersion, plus a
+>   body lens, so the whole pane refracts and not just its rim
+> - **shape-from-alpha** for shell layers: each pill, card and dock gets its own bezel instead of
+>   sharing the layer's bounding box
+> - **no key light**: a crisp one-pixel rim that brightens only where it reflects something bright
+> - **touch light**: pressing glass lights it from the press point, and nearby glass catches it
+> - **readable glass**: bright backdrops are pulled toward a luminance ceiling; shell panels cast a
+>   soft shadow
+> - **magic lamp** (genie) minimize and restore as a window transformer (`hyprctl hyprglass minimize`)
+> - presets `tahoe_clear`, `tahoe`, `tahoe_window`, and the global settings `tinted`,
+>   `edge_highlight` and `lens`
+>
+> Everything below is upstream's documentation and still applies. Build this branch with `make`
+> against your Hyprland's headers. All credit for the plugin itself goes to its upstream authors;
+> licence unchanged (BSD 3-Clause).
+
 Liquid Glass for [Hyprland](https://hyprland.org/).
 
 Frosted blur, edge refraction, chromatic aberration, specular highlights — fully customizable, per-theme, on every window and layer surface.
