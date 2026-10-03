@@ -213,15 +213,20 @@ inline void applyTahoeBase(SCustomPreset& p) {
     p.dark.vibrancyDarkness      = 0.0f;
     p.dark.adaptiveBoost         = 0.0f;    // dark mode never lifts the backdrop
 
+    // Light mode is the mirror: milky, never dimmed, a dark backdrop lifted
+    // toward a floor so dark text stays readable, and a lighter shadow.
     p.light.contrast             = 1.0f;
-    p.light.saturation           = 1.05f;
+    p.light.saturation           = 1.08f;
     p.light.vibrancy             = 0.12f;
     p.light.vibrancyDarkness     = 0.0f;
+    p.light.adaptiveDim          = 0.0f;
+    p.light.bevelShadow          = 0.18f;
 }
 
 // macOS Tahoe "Clear", for chrome over content (bar, dock). Interior stays
 // sharp, the bezel lenses hard. In dark mode it is smoked: what is behind
-// shows through a little darker, like Tahoe's dark-tint dock and widgets.
+// shows through a little darker, like Tahoe's dark-tint dock and widgets; in
+// light mode a little milkier.
 inline SCustomPreset makeTahoeClear() {
     SCustomPreset p;
     p.name = "tahoe_clear";
@@ -237,10 +242,9 @@ inline SCustomPreset makeTahoeClear() {
     p.dark.adaptiveDim           = 0.80f;   // bright backdrops toned down for white text
     p.dark.tintColor             = 0x0a0a0c40;
 
-    p.light.brightness           = 1.02f;
-    p.light.adaptiveDim          = 0.10f;
-    p.light.adaptiveBoost        = 0.25f;
-    p.light.tintColor            = 0xffffff30;
+    p.light.brightness           = 1.04f;
+    p.light.adaptiveBoost        = 0.55f;
+    p.light.tintColor            = 0xffffff2a;
 
     return p;
 }
@@ -263,10 +267,9 @@ inline SCustomPreset makeTahoeRegular() {
     p.dark.adaptiveDim           = 0.85f;
     p.dark.tintColor             = 0x0b0b0e66;
 
-    p.light.brightness           = 1.02f;
-    p.light.adaptiveDim          = 0.10f;
-    p.light.adaptiveBoost        = 0.25f;
-    p.light.tintColor            = 0xffffff70;
+    p.light.brightness           = 1.03f;
+    p.light.adaptiveBoost        = 0.85f;
+    p.light.tintColor            = 0xfbfbfd70;
 
     return p;
 }
@@ -292,9 +295,8 @@ inline SCustomPreset makeTahoeWindow() {
     p.dark.tintColor             = 0x0c0c0f58;
 
     p.light.brightness           = 1.0f;
-    p.light.adaptiveDim          = 0.10f;
-    p.light.adaptiveBoost        = 0.30f;
-    p.light.tintColor            = 0xf5f5f7a0;
+    p.light.adaptiveBoost        = 0.70f;
+    p.light.tintColor            = 0xf5f5f780;
 
     return p;
 }

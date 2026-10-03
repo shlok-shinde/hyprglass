@@ -430,14 +430,23 @@ void main() {
     float lum = dot(color, vec3(0.2126, 0.7152, 0.0722));
     color = mix(vec3(lum), color, saturation);
 
-    // Adaptive tone: a bright backdrop is pulled down toward a ceiling, so the
-    // shell's white text stays readable on any wallpaper or window; a dark one
-    // is left as it is. adaptive_dim = how hard (1 = flat at the ceiling).
+    // Adaptive tone. Dark mode: a bright backdrop is pulled down toward a
+    // ceiling, so the shell's white text stays readable on any wallpaper or
+    // window; a dark one is left as it is. adaptive_dim = how hard (1 = flat
+    // at the ceiling).
     const float CEILING = 0.30;
-    float lumCurve = smoothstep(0.25, 0.55, lum);
     float toned    = lum - max(lum - CEILING, 0.0) * adaptiveDim;
     color *= brightness * (lum > 1e-4 ? toned / lum : 1.0);
-    color += vec3(adaptiveBoost * (1.0 - lumCurve) * 0.5);
+    // Light mode, the mirror: a dark backdrop is lifted toward a floor by
+    // mixing in white (milky, like Tahoe's light glass), so dark text stays
+    // readable; a bright one is left as it is. adaptive_boost = how hard
+    // (1 = nothing darker than the floor).
+    const float FLOOR = 0.74;
+    if (adaptiveBoost > 0.001) {
+        float l      = dot(color, vec3(0.2126, 0.7152, 0.0722));
+        float lifted = l + max(FLOOR - l, 0.0) * adaptiveBoost;
+        color = mix(color, vec3(1.0), clamp((lifted - l) / max(1.0 - l, 1e-3), 0.0, 1.0));
+    }
     color = mix(vec3(0.5), color, contrast);
 
     float currentLum = dot(color, vec3(0.2126, 0.7152, 0.0722));

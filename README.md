@@ -9,7 +9,8 @@
 >   sharing the layer's bounding box
 > - **no key light**: a crisp one-pixel rim that brightens only where it reflects something bright
 > - **touch light**: pressing glass lights it from the press point, and nearby glass catches it
-> - **readable glass**: bright backdrops are pulled toward a luminance ceiling; shell panels cast a
+> - **readable glass**: in dark mode bright backdrops are pulled toward a luminance ceiling, in
+>   light mode dark ones are lifted toward a floor (`adaptive_boost`, milky); shell panels cast a
 >   soft shadow
 > - **magic lamp** (genie) minimize and restore as a window transformer (`hyprctl hyprglass minimize`),
 >   and windows that open out of their dock icon (`hyprctl hyprglass launch`)
