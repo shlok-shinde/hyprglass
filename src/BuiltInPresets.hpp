@@ -191,44 +191,46 @@ inline SCustomPreset makePomme() {
 //   bevel_*             the hairline rim light and its soft inner band
 //   fresnel_strength    light scattered inside the curved rim
 
-// macOS Tahoe "Clear": barely any frost, strong lensing, a dimming layer for legibility.
+// macOS Tahoe "Clear". Matches Apple's own close-ups: the interior stays sharp,
+// the bezel lenses hard, and over a dark backdrop the pane reads LIGHTER than
+// what is behind it (scattered light, bright rims), not smoked.
 inline SCustomPreset makeTahoeClear() {
     SCustomPreset p;
     p.name = "tahoe_clear";
 
-    p.shared.blurStrength        = 0.22f;
+    p.shared.blurStrength        = 0.16f;
     p.shared.blurIterations      = 2;
-    p.shared.refractionStrength  = 1.6f;
-    p.shared.chromaticAberration = 0.55f;
+    p.shared.refractionStrength  = 1.8f;
+    p.shared.chromaticAberration = 0.6f;
     p.shared.edgeThickness       = 0.06f;
     p.shared.lensDistortion      = 0.0f;
-    p.shared.fresnelStrength     = 0.55f;
-    p.shared.fresnelTint         = 0.35f;
+    p.shared.fresnelStrength     = 0.75f;
+    p.shared.fresnelTint         = 0.4f;
     p.shared.fresnelColor        = 0xffffff00;
-    p.shared.specularStrength    = 0.45f;
+    p.shared.specularStrength    = 0.5f;
     p.shared.specularAngle       = 315.0f;
-    p.shared.bevelStrength       = 0.85f;
+    p.shared.bevelStrength       = 0.9f;
     p.shared.bevelSize           = 5.0f;
     p.shared.bevelTint           = 0.15f;
     p.shared.bevelAngle          = 315.0f;
-    p.shared.bevelShadow         = 0.25f;
+    p.shared.bevelShadow         = 0.15f;
     p.shared.glassOpacity        = 1.0f;
 
-    p.dark.brightness            = 0.80f;
+    p.dark.brightness            = 1.0f;
     p.dark.contrast              = 1.0f;
-    p.dark.saturation            = 1.0f;
-    p.dark.vibrancy              = 0.10f;
+    p.dark.saturation            = 1.05f;
+    p.dark.vibrancy              = 0.15f;
     p.dark.vibrancyDarkness      = 0.0f;
-    p.dark.adaptiveDim           = 0.30f;
-    p.dark.adaptiveBoost         = 0.0f;
-    p.dark.tintColor             = 0x00000024;
+    p.dark.adaptiveDim           = 0.35f;   // bright backdrops are toned down for white text...
+    p.dark.adaptiveBoost         = 0.16f;   // ...dark ones get the milky lift
+    p.dark.tintColor             = 0xffffff12;
 
-    p.light.brightness           = 1.04f;
+    p.light.brightness           = 1.02f;
     p.light.contrast             = 1.0f;
-    p.light.saturation           = 1.0f;
-    p.light.vibrancy             = 0.10f;
+    p.light.saturation           = 1.05f;
+    p.light.vibrancy             = 0.12f;
     p.light.vibrancyDarkness     = 0.0f;
-    p.light.adaptiveDim          = 0.0f;
+    p.light.adaptiveDim          = 0.10f;
     p.light.adaptiveBoost        = 0.25f;
     p.light.tintColor            = 0xffffff30;
 
