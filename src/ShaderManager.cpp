@@ -31,6 +31,7 @@ bool CShaderManager::compileGlassShader() {
     const auto program = glassShader->program();
 
     glassUniforms.refractionStrength  = glGetUniformLocation(program, "refractionStrength");
+    glassUniforms.noiseStrength       = glGetUniformLocation(program, "noiseStrength");
     glassUniforms.chromaticAberration = glGetUniformLocation(program, "chromaticAberration");
     glassUniforms.fresnelStrength     = glGetUniformLocation(program, "fresnelStrength");
     glassUniforms.specularStrength    = glGetUniformLocation(program, "specularStrength");
@@ -68,6 +69,7 @@ bool CShaderManager::compileGlassShader() {
     glassUniforms.maskUVOffset        = glGetUniformLocation(program, "maskUVOffset");
     glassUniforms.maskUVScale         = glGetUniformLocation(program, "maskUVScale");
     glassUniforms.maskAlphaThreshold  = glGetUniformLocation(program, "maskAlphaThreshold");
+    glassUniforms.maskCoverage        = glGetUniformLocation(program, "maskFeather");
     glassUniforms.maskMode            = glGetUniformLocation(program, "maskMode");
     glassUniforms.regionRectCount     = glGetUniformLocation(program, "regionRectCount");
     glassUniforms.regionRects         = glGetUniformLocation(program, "regionRects[0]");
@@ -165,19 +167,8 @@ void CShaderManager::initializeIfNeeded() {
     if (m_initialized)
         return;
 
-    if (!compileGlassShader())
-        return;
-
-    if (!compileBlurShader())
-        return;
-
-    if (!compileFieldShader())
-        return;
-
-    if (!compileGenieShader())
-        return;
-
-    m_initialized = true;
+    m_initialized   = compileGlassShader() && compileBlurShader() && compileFieldShader() && compileGenieShader();
+    m_compileFailed = !m_initialized;
 }
 
 void CShaderManager::destroy() noexcept {
@@ -185,5 +176,6 @@ void CShaderManager::destroy() noexcept {
     blurShader->destroy();
     fieldShader->destroy();
     genieShader->destroy();
-    m_initialized = false;
+    m_initialized   = false;
+    m_compileFailed = false;
 }

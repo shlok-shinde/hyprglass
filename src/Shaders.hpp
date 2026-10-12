@@ -23,7 +23,7 @@ precision highp float;
  * 3. Edge raw-texture blend for vivid color pickup
  * 4. Body lens: the whole pane is a shallow convex lens
  * 5. Frosted tint (brightness boost + desaturation)
- * 6. Configurable color tint overlay
+ * 6. Configurable color tint overlay, then frosted grain
  * 7. Rim: a crisp one-pixel edge, nearly invisible unless it has something
  *    bright to reflect (no key light, no lit corner)
  * 8. Fresnel edge glow (white or tinted by the background)
@@ -37,6 +37,7 @@ uniform vec4 radii;            // per-corner radius: top-left, top-right, bottom
 uniform vec2 uvPadding;
 
 uniform float refractionStrength;
+uniform float noiseStrength;
 uniform float chromaticAberration;
 uniform float fresnelStrength;
 uniform float specularStrength;
@@ -77,9 +78,10 @@ uniform int useMask;
 uniform vec2 maskUVOffset;
 uniform vec2 maskUVScale;
 uniform float maskAlphaThreshold;
+uniform float maskFeather;     // alpha mask: glass fades in over this alpha range above the threshold (0 = this fork's own soft edge); not maskCoverage(), the field function
 uniform int maskMode;          // 0 = alpha threshold, 1 = protocol region
-uniform int regionRectCount;   // 0..16
-uniform vec4 regionRects[16];  // box-local pixels: xy = offset from box top-left, zw = size
+uniform int regionRectCount;   // 0..64
+uniform vec4 regionRects[64];  // box-local pixels: xy = offset from box top-left, zw = size
 
 // Subsurface item glass only: the rounded-box SDF (getCornerSDF below) is
 // evaluated over this sub-rect of the drawn box instead of the full box —
@@ -141,6 +143,13 @@ vec2 toTexUV(vec2 wuv) {
 vec4 sampleBlurred(vec2 wuv) {
     vec2 tuv = toTexUV(toSampleBoxUV(wuv));
     return texture(tex, clamp(tuv, 0.001, 0.999));
+}
+
+// hash12 from "Hash without Sine" (Dave Hoskins), tuned for integer pixel coordinates
+float pixelHash(vec2 p) {
+    vec3 p3 = fract(vec3(p.xyx) * 0.1031);
+    p3 += dot(p3, p3.yzx + 33.33);
+    return fract((p3.x + p3.y) * p3.z);
 }
 
 // ============================================================================
@@ -337,7 +346,14 @@ void main() {
             }
             if (!insideRegion) { fragColor = surfacePixel; return; } // premultiplied, output as-is
         } else {
-            coverage = smoothstep(maskAlphaThreshold * 0.6, maskAlphaThreshold * 1.4 + 0.004, surfacePixel.a);
+            if (maskFeather > 0.0) {
+                // A soft edge set for this layer (layers mask_feather): the glass fades
+                // in over that alpha range above the threshold. Not smoothstep(): it is
+                // undefined when threshold + feather rounds to threshold in float.
+                float t = clamp((surfacePixel.a - maskAlphaThreshold) / maskFeather, 0.0, 1.0);
+                coverage = surfacePixel.a < maskAlphaThreshold ? 0.0 : t * t * (3.0 - 2.0 * t);
+            } else
+                coverage = smoothstep(maskAlphaThreshold * 0.6, maskAlphaThreshold * 1.4 + 0.004, surfacePixel.a);
             // Not glass here: hand the shell's own pixel through, over a soft
             // shadow that the pane casts (it is what sets a pane apart from a
             // bright backdrop). The coverage field reaches a little past the shape.
@@ -460,6 +476,17 @@ void main() {
     if (tinted > 0.001)
         color = mix(color, tintedColor, tinted * 0.62);
 
+    // grain-free copy for the rim tints, so the grain does not speckle their hue
+    vec3 tintSource = color;
+
+    // ========================================
+    // FROSTED GRAIN
+    // Hashed on box-local pixels so the grain moves with the glass and keeps
+    // its size on any window; after the tint so the tint does not fade it.
+    // ========================================
+    if (noiseStrength > 0.001)
+        color += (pixelHash(floor(uv * fullSize)) - 0.5) * noiseStrength * 0.1;
+
     // What the edge reflects: the backdrop just outside it. Bright content
     // there lights the rim; over a dark backdrop the rim all but disappears.
     vec3  envC = sampleBlurred(uv + nOut * invFullSize * 5.0 * px).rgb;
@@ -473,8 +500,8 @@ void main() {
         vec3 glow = vec3(1.0);
         if (fresnelColorAlpha > 0.001) glow = mix(glow, fresnelColor, fresnelColorAlpha);
         if (fresnelTint > 0.001) {
-            float maxC = max(max(color.r, color.g), color.b);
-            glow = mix(glow, maxC > 0.001 ? color / maxC : vec3(1.0), fresnelTint);
+            float maxC = max(max(tintSource.r, tintSource.g), tintSource.b);
+            glow = mix(glow, maxC > 0.001 ? tintSource / maxC : vec3(1.0), fresnelTint);
         }
         color += glow * rimFall * rimFall * fresnelStrength * 0.10 * (0.3 + 0.7 * env);
     }
@@ -515,8 +542,8 @@ void main() {
         vec3 rimLight = vec3(1.0);
         if (bevelColorAlpha > 0.001) rimLight = mix(rimLight, bevelColor, bevelColorAlpha);
         if (bevelTint > 0.001) {
-            float maxC = max(max(color.r, color.g), color.b);
-            rimLight = mix(rimLight, maxC > 0.001 ? color / maxC : vec3(1.0), bevelTint);
+            float maxC = max(max(tintSource.r, tintSource.g), tintSource.b);
+            rimLight = mix(rimLight, maxC > 0.001 ? tintSource / maxC : vec3(1.0), bevelTint);
         }
         float rim = line * bevelStrength * rimLevel * (0.42 + 0.58 * env)
                   + (line * 1.6 + band * 3.0) * touch;

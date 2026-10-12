@@ -19,6 +19,8 @@ class CGlassPassElement : public IPassElement {
         // Only take the backdrop into the decoration's cache, draw nothing
         // (a window opening out of the genie, see queueGlassPass).
         bool                 sampleOnly  = false;
+        // Resolved once in draw(): needsLiveBlur() and renderPass() must agree on it.
+        bool                 xray        = false;
     };
 
     explicit CGlassPassElement(const SGlassPassData& data);
