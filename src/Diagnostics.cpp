@@ -296,14 +296,14 @@ std::string formatStats(eHyprCtlOutputFormat format) {
                 "\"layerGlassDraws\": {}, \"layerCacheHits\": {}, \"layerCacheMisses\": {}, \"layerDeferredResamples\": {}, "
                 "\"subsurfaceGlassDraws\": {}, \"subsurfaceCacheHits\": {}, \"subsurfaceCacheMisses\": {}, \"subsurfaceDeferredResamples\": {}, "
                 "\"xrayCopies\": {}, \"xrayDeferredResamples\": {}, \"xrayEvictions\": {}, "
-                "\"blurPasses\": {}, "
+                "\"frostRebuilds\": {}, \"contourRebuilds\": {}, \"blurPasses\": {}, "
                 "\"sampledMegapixels\": {:.3f}, \"glassMegapixels\": {:.3f}, \"stageTimersAvgMicroseconds\": {{",
                 escapeJSONStrings(monitorLabel(id)), counters.frames, counters.windowGlassDraws, counters.windowOpaqueSkipped,
                 counters.windowCacheHits, counters.windowCacheMisses, counters.windowDeferredResamples, counters.windowPassDiscarded,
                 counters.layerGlassDraws, counters.layerCacheHits, counters.layerCacheMisses, counters.layerDeferredResamples,
                 counters.subsurfaceGlassDraws, counters.subsurfaceCacheHits, counters.subsurfaceCacheMisses, counters.subsurfaceDeferredResamples,
                 counters.xrayCopies, counters.xrayDeferredResamples, counters.xrayEvictions,
-                counters.blurPasses, counters.sampledMegapixels, counters.glassMegapixels);
+                counters.frostRebuilds, counters.contourRebuilds, counters.blurPasses, counters.sampledMegapixels, counters.glassMegapixels);
 
             const auto& stageNanoseconds = stageNanosecondsFor(id);
             for (size_t i = 0; i < STAGE_COUNT; i++) {
@@ -333,20 +333,20 @@ std::string formatStats(eHyprCtlOutputFormat format) {
         out += "  (no frames recorded yet)\n";
 
     out += std::format(
-        "\n  {:<14} {:>8} {:>10} {:>12} {:>9} {:>9} {:>10} {:>9} {:>12} {:>10} {:>10} {:>11} {:>10} {:>12} {:>11} {:>11} {:>10} {:>11} {:>11} {:>10} {:>12} {:>11}\n",
+        "\n  {:<14} {:>8} {:>10} {:>12} {:>9} {:>9} {:>10} {:>9} {:>12} {:>10} {:>10} {:>11} {:>10} {:>12} {:>11} {:>11} {:>10} {:>11} {:>11} {:>10} {:>12} {:>11} {:>11} {:>13}\n",
         "monitor", "frames", "win_draws", "opaque_skip", "win_hit", "win_miss", "win_defer", "win_disc", "layer_draws", "layer_hit",
         "layer_miss", "layer_defer", "sub_draws", "sub_hit", "sub_miss", "sub_defer", "xray_copy", "xray_defer", "xray_evict", "blur_pass",
-        "sampled_mpx", "glass_mpx");
+        "sampled_mpx", "glass_mpx", "frost_build", "contour_build");
 
     for (const auto& [id, counters] : s_counters) {
         out += std::format(
-            "  {:<14} {:>8} {:>10} {:>12} {:>9} {:>9} {:>10} {:>9} {:>12} {:>10} {:>10} {:>11} {:>10} {:>12} {:>11} {:>11} {:>10} {:>11} {:>11} {:>10} {:>12.2f} {:>11.2f}\n",
+            "  {:<14} {:>8} {:>10} {:>12} {:>9} {:>9} {:>10} {:>9} {:>12} {:>10} {:>10} {:>11} {:>10} {:>12} {:>11} {:>11} {:>10} {:>11} {:>11} {:>10} {:>12.2f} {:>11.2f} {:>11} {:>13}\n",
             monitorLabel(id), counters.frames, counters.windowGlassDraws, counters.windowOpaqueSkipped, counters.windowCacheHits,
             counters.windowCacheMisses, counters.windowDeferredResamples, counters.windowPassDiscarded, counters.layerGlassDraws,
             counters.layerCacheHits, counters.layerCacheMisses, counters.layerDeferredResamples,
             counters.subsurfaceGlassDraws, counters.subsurfaceCacheHits, counters.subsurfaceCacheMisses, counters.subsurfaceDeferredResamples,
             counters.xrayCopies, counters.xrayDeferredResamples, counters.xrayEvictions,
-            counters.blurPasses, counters.sampledMegapixels, counters.glassMegapixels);
+            counters.blurPasses, counters.sampledMegapixels, counters.glassMegapixels, counters.frostRebuilds, counters.contourRebuilds);
 
         if (counters.frames > 0) {
             const double frames = static_cast<double>(counters.frames);
@@ -523,6 +523,14 @@ void recordXrayDeferredResample(MONITORID monitor) {
 
 void recordXrayEvict(MONITORID monitor) {
     countersFor(monitor).xrayEvictions++;
+}
+
+void recordFrostRebuild(MONITORID monitor) {
+    countersFor(monitor).frostRebuilds++;
+}
+
+void recordContourRebuild(MONITORID monitor) {
+    countersFor(monitor).contourRebuilds++;
 }
 
 void recordBlurPasses(MONITORID monitor, uint64_t passes) {

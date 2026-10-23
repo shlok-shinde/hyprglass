@@ -1,4 +1,32 @@
 
+## [v0.11.0](https://github.com/Hyprnux/hyprglass/compare/v0.10.0...v0.11.0) - 2026-10-19
+
+### Bug Fixes
+
+* glass edges and refraction of app-drawn glass shapes follow the shape
+* a glass shader that fails to compile no longer stalls every frame (spotted by [@Eddie175](https://github.com/Eddie175))
+* layer glass no longer shifts for a frame when its blur region changes (spotted by [@Eddie175](https://github.com/Eddie175))
+* glass no longer stays stale after a quick burst of changes (spotted by [@Eddie175](https://github.com/Eddie175))
+* no stray glass from bars or glass layers over the lock screen (spotted by [@Eddie175](https://github.com/Eddie175))
+
+### Documentation
+
+* a user preset named like a built-in one extends it instead of replacing it
+
+### Features
+
+* layer glass can follow each shape an app draws (idea from [@Eddie175](https://github.com/Eddie175)'s True Glass)
+* glass frosts only where other windows are behind it (idea from [@Eddie175](https://github.com/Eddie175)'s True Glass)
+* bars and panels can have their own rounded glass shape (idea from [@Eddie175](https://github.com/Eddie175)'s True Glass)
+* optional light along the active window's glass edge (idea from [@Eddie175](https://github.com/Eddie175)'s True Glass)
+* lens-like glass edges that can mirror their surroundings (idea from [@Eddie175](https://github.com/Eddie175)'s True Glass)
+* set the glass edge thickness in pixels ([#92](https://github.com/Hyprnux/hyprglass/issues/92))
+
+### Performance Improvements
+
+* glass effects that are switched off cost nothing
+
+
 ## [v0.10.0](https://github.com/Hyprnux/hyprglass/compare/v0.9.1...v0.10.0) - 2026-10-09
 
 ### Bug Fixes
@@ -13,6 +41,10 @@
 ### CI/CD
 
 * releases are only built against a released Hyprland version
+
+### Chores
+
+* **release:** v0.10.0 [skip ci]
 
 ### Documentation
 

@@ -58,7 +58,10 @@ bool CGlassLayerPassElement::needsLiveBlur() {
     // An x-ray snapshot that already covers the layer is sampled instead of the
     // frame. One that does not needs this hint: it un-occludes the background
     // under opaque windows so the snapshot copy picks it up this frame.
-    return !(m_data.xray && m_data.layerState->xraySnapshotCovers(g_pHyprRenderer->m_renderData.pMonitor.lock()));
+    // A contour field waiting to be built needs it too, for the same reason: the build
+    // wants every pixel of the layer redrawn, and nothing may occlude part of it.
+    return !(m_data.xray && m_data.layerState->xraySnapshotCovers(g_pHyprRenderer->m_renderData.pMonitor.lock())) ||
+           m_data.layerState->needsContourBuild();
 }
 
 bool CGlassLayerPassElement::needsPrecomputeBlur() {

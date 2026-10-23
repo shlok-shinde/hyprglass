@@ -16,6 +16,7 @@
 #include <GLES3/gl32.h>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
+#include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprland/src/render/Renderer.hpp>
@@ -77,6 +78,81 @@ void CGlassDecoration::onFullscreenStateChanged() {
 
 static float selfSampleFor(const SResolveContext& ctx) {
     return std::clamp(resolvePresetFloat(ctx, &SPresetValues::selfSample, &SOverridableConfig::selfSample), 0.0f, 1.0f);
+}
+
+// Not std::clamp: a NaN must read as off, not reach the shader.
+static float focusLightFor(const SResolveContext& ctx) {
+    const float value = resolvePresetFloat(ctx, &SPresetValues::focusLight, &SOverridableConfig::focusLight);
+    return value > 0.0f ? std::min(value, 1.0f) : 0.0f;
+}
+
+// Not std::clamp: a NaN must read as off, not reach the shader.
+static float frostFor(const SResolveContext& ctx) {
+    const float value = resolvePresetFloat(ctx, &SPresetValues::frost, &SOverridableConfig::frost, GlobalDefaults::FROST);
+    return value > 0.0f ? std::min(value, 1.0f) : 0.0f;
+}
+
+static float frostBlurFor(const SResolveContext& ctx) {
+    const float value = resolvePresetFloat(ctx, &SPresetValues::frostBlur, &SOverridableConfig::frostBlur, GlobalDefaults::FROST_BLUR);
+    return value > 0.0f ? std::min(value, Frost::BLUR_MAX) : 0.0f;
+}
+
+static constexpr std::chrono::milliseconds FOCUS_LIGHT_FADE{200};
+
+// Hyprland's animations:enabled; a key that cannot be read counts as on.
+static bool hyprlandAnimationsEnabled() {
+    const auto& pointer = g_pGlobalState->config.animationsEnabled;
+    return !pointer.dataptr || readIntegerConfig(pointer) != 0;
+}
+
+bool CGlassDecoration::focusLightFading(std::chrono::steady_clock::time_point now) const {
+    return now - m_focusLightChangedAt < FOCUS_LIGHT_FADE && hyprlandAnimationsEnabled();
+}
+
+float CGlassDecoration::focusLightLevel(std::chrono::steady_clock::time_point now) const {
+    const float target = m_focusLightTarget ? 1.0f : 0.0f;
+    if (!focusLightFading(now))
+        return target;
+
+    const float progress = std::clamp(std::chrono::duration<float>(now - m_focusLightChangedAt) / FOCUS_LIGHT_FADE, 0.0f, 1.0f);
+    const float eased    = progress * progress * (3.0f - 2.0f * progress);
+    return m_focusLightFrom + (target - m_focusLightFrom) * eased;
+}
+
+// The light lies inside the glass box: damaging the window box is enough, and
+// unlike damageEntire() leaves the sampling margin around it alone.
+static void damageGlassBox(const PHLWINDOW& window) {
+    if (!window)
+        return;
+
+    if (const auto box = WindowGeometry::computePaddedGlobalBox(window, 0.0f))
+        g_pHyprRenderer->damageBox(*box);
+}
+
+void CGlassDecoration::damageFocusLight() {
+    damageGlassBox(m_window.lock());
+}
+
+void CGlassDecoration::damageFrost() {
+    damageGlassBox(m_window.lock());
+}
+
+void CGlassDecoration::onActiveWindowChanged(const PHLWINDOW& activeWindow) {
+    // A closing last window is announced as active with focus already cleared.
+    const auto focus  = Desktop::focusState();
+    const bool active = activeWindow && ownsWindow(activeWindow) && focus && focus->window() == activeWindow;
+    if (active == m_focusLightTarget)
+        return;
+
+    const auto now        = std::chrono::steady_clock::now();
+    m_focusLightFrom      = focusLightLevel(now);
+    m_focusLightTarget    = active;
+    m_focusLightChangedAt = now;
+
+    // a hidden workspace keeps its last strength; renderPass() damages it once shown
+    const auto window = m_window.lock();
+    if (m_lastFocusLightStrength > 0.0f && window && window->m_workspace && window->m_workspace->isVisible())
+        damageFocusLight();
 }
 
 CGlassDecoration::EEnabledResolution CGlassDecoration::resolveEnabled() const {
@@ -246,6 +322,16 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
             Hash::hashCombine(fingerprint.runningHash, window.get(), window->positionAnimation()->value(),
                                window->sizeAnimation()->value(), alpha, fullscreenMode, workspaceRenderOffset);
 
+            // The fade itself is not folded, only its start and its end: glass
+            // stacked above resamples the settled light, not every fade step.
+            m_focusLightFadingAtDraw = m_lastFocusLightStrength > 0.0f && focusLightFading(std::chrono::steady_clock::now());
+            if (m_lastFocusLightStrength > 0.0f)
+                Hash::hashCombine(fingerprint.runningHash, m_focusLightFadingAtDraw ? 2 : static_cast<int>(m_focusLightTarget));
+
+            // Same for frost: glass stacked above resamples where the ease starts and where it ends.
+            if (m_frost.moving() || m_frost.amount() > 0.0f)
+                Hash::hashCombine(fingerprint.runningHash, m_frost.moving() ? 2 : 1);
+
             m_lastFoldedFrameSerial = g_pGlobalState->frameSerial;
         }
     }
@@ -257,7 +343,9 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
         scheduleShadowsForWindowGlass();
     m_glassWasEnabled = enabled;
     if (!enabled) {
-        m_lastSelfSample = 0.0f;
+        m_lastSelfSample         = 0.0f;
+        m_lastFocusLightStrength = 0.0f;
+        m_frost.reset();
 
         // Only count a skip that resolveEnabled() itself attributes to
         // skip_opaque_windows — a tag or global-disable skip doesn't have a
@@ -300,14 +388,34 @@ void CGlassDecoration::markBackgroundDirty() {
     const auto& config = g_pGlobalState->config;
     const int64_t fps = config.windowsLiveResampleFps ? **config.windowsLiveResampleFps : 0;
     const auto now = std::chrono::steady_clock::now();
-    if (fps > 0 && now - m_lastDirtyMark < std::chrono::nanoseconds(1'000'000'000 / fps))
-        return;
+    if (fps > 0) {
+        const auto interval = std::chrono::nanoseconds(1'000'000'000 / fps);
+        if (now - m_lastDirtyMark < interval) {
+            m_deferredResampleAt = m_lastDirtyMark + interval;
+            BackgroundDamageObserver::deferResample(*m_deferredResampleAt);
+            return;
+        }
+    }
+    m_deferredResampleAt.reset();
     m_lastDirtyMark = now;
 
     m_backgroundDirty = true;
     // damage the full sample region: outside the committed area the framebuffer
     // still holds our previous glass output, which must not be re-sampled
     damageEntire();
+}
+
+void CGlassDecoration::flushDeferredResample(std::chrono::steady_clock::time_point now) {
+    if (!m_deferredResampleAt)
+        return;
+
+    if (now < *m_deferredResampleAt) {
+        BackgroundDamageObserver::deferResample(*m_deferredResampleAt);
+        return;
+    }
+
+    m_deferredResampleAt.reset();
+    markBackgroundDirty();
 }
 
 bool CGlassDecoration::wantsBackgroundResample(PHLMONITOR monitor, const CBox& transformBox, bool xray) const {
@@ -455,6 +563,26 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
     if (const auto workspace = window->m_workspace; workspace && !window->m_pinned)
         glassAlpha *= workspace->m_alpha->value();
 
+    // A fullscreen window shows no edge, like Hyprland draws it no border.
+    m_lastFocusLightStrength = fsUnrounded ? 0.0f : focusLightFor(ctx);
+    float focusLight         = 0.0f;
+    if (m_lastFocusLightStrength > 0.0f) {
+        const auto now = std::chrono::steady_clock::now();
+        // window.active normally got here first; this catches the window's first
+        // frame (and any missed change) without a fade
+        const auto focus  = Desktop::focusState();
+        const bool active = focus && focus->window() == window;
+        if (active != m_focusLightTarget) {
+            m_focusLightTarget    = active;
+            m_focusLightFrom      = active ? 1.0f : 0.0f;
+            m_focusLightChangedAt = {};
+        }
+        focusLight = m_lastFocusLightStrength * focusLightLevel(now);
+        // damage, not a loop: it stops once draw() has seen the fade settle
+        if (focusLightFading(now) || m_focusLightFadingAtDraw)
+            damageFocusLight();
+    }
+
     const MONITORID monitorId = monitor ? monitor->m_id : -1; // -1 mirrors Hyprland's own MONITOR_INVALID
 
     if (!wantsBackgroundResample(monitor, transformBox, xray)) {
@@ -490,6 +618,8 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
 
             GlassRenderer::blurBackground(m_sampleFramebuffer, blurRadius, blurIterations, source);
 
+            m_frost.sampleChanged();
+
             m_hasCachedSample       = true;
             m_cachedFromSnapshot    = xray;
             m_lastSceneGeneration   = g_pGlobalState->getSceneGeneration(monitor);
@@ -519,10 +649,57 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
     if (sampleOnly)
         return;
 
+    // Frost: blurred further where windows lie behind, clear over the wallpaper. X-ray
+    // shows no window behind the glass, and a fullscreen window has nothing behind it.
+    GlassRenderer::SFrostInput frostInput;
+    const float                frostSetting = (xray || fsUnrounded) ? 0.0f : frostFor(ctx);
+    if (frostSetting > 0.0f || m_frost.active()) {
+        const float target =
+            frostSetting > 0.0f ? frostSetting * Frost::amountForCoverage(Frost::coveredFraction(window, monitor, windowBox)) : 0.0f;
+
+        // A window spanning two monitors gets a different target on each: it snaps on a
+        // monitor change, or it would ease between them and never settle.
+        const bool sameMonitor = m_frostMonitor == monitorId;
+        m_frostMonitor         = monitorId;
+
+        // damage, not a loop: it stops once the amount settles. The sample is unchanged,
+        // so no resample is owed and the cache stays valid.
+        if (m_frost.step(target, sameMonitor && hyprlandAnimationsEnabled(), std::chrono::steady_clock::now()))
+            damageFrost();
+
+        if (m_frost.amount() > Frost::MINIMUM_AMOUNT) {
+            const float blurStrength = resolvePresetFloat(ctx, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength);
+            const int   downscale    = blurStrength >= GlassRenderer::BLUR_DOWNSCALE_THRESHOLD ? GlassRenderer::BLUR_DOWNSCALE_MAX : 1;
+            // the copy is half the sample's size on top of the sample's own downscale
+            const float radius = frostBlurFor(ctx) * 12.0f / (2.0f * downscale);
+
+            if (m_frost.needsBuild(m_sampleFramebuffer, radius)) {
+                float frostRadius     = radius;
+                int   frostIterations = Frost::BLUR_ITERATIONS;
+                if (ctx.config.blurFold && **ctx.config.blurFold) {
+                    const GlassRenderer::SFoldedBlur folded = GlassRenderer::foldBlurPasses(frostRadius, frostIterations);
+                    frostRadius     = folded.radius;
+                    frostIterations = folded.iterations;
+                }
+
+                if (GlassRenderer::buildFrostCopy(m_sampleFramebuffer, m_frost.copy(), m_frost.temporary(), frostRadius, frostIterations, source)) {
+                    m_frost.built(radius);
+                    Diagnostics::recordFrostRebuild(monitorId);
+                }
+            }
+
+            if (!m_frost.needsBuild(m_sampleFramebuffer, radius))
+                frostInput = {m_frost.copy(), m_frost.amount()};
+        } else {
+            m_frost.releaseCopy();
+        }
+    }
+
     GlassRenderer::applyGlassEffect(m_sampleFramebuffer, source,
                                      windowBox, transformBox, glassAlpha,
                                      std::array<float, 4>{cornerRadius, cornerRadius, cornerRadius, cornerRadius},
-                                     roundingPower, m_samplePaddingRatio, ctx);
+                                     roundingPower, m_samplePaddingRatio, ctx, nullptr, focusLight,
+                                     frostInput.copy ? &frostInput : nullptr);
 }
 
 eDecorationType CGlassDecoration::getDecorationType() {

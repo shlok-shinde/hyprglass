@@ -1,4 +1,5 @@
 #include "GlassLayerSurface.hpp"
+#include "BackgroundDamageObserver.hpp"
 #include "BuiltInPresets.hpp"
 #include "Diagnostics.hpp"
 #include "GlassRenderer.hpp"
@@ -126,6 +127,17 @@ ELayerMaskMode CGlassLayerSurface::resolveMaskMode() const {
     return ELayerMaskMode::AUTO;
 }
 
+std::optional<SLayerShape> CGlassLayerSurface::resolveShape() const {
+    const auto layerSurface = m_layerSurface.lock();
+    if (!layerSurface)
+        return std::nullopt;
+
+    const auto& shapes = g_pGlobalState->layerNamespaceShapes;
+    if (auto it = shapes.find(layerSurface->m_namespace); it != shapes.end())
+        return it->second;
+    return std::nullopt;
+}
+
 CGlassLayerSurface::EMaskSource CGlassLayerSurface::resolveMaskSource() const {
     const auto layerSurface = m_layerSurface.lock();
     const auto wlSurface    = layerSurface ? layerSurface->wlSurface() : nullptr; // root surface only
@@ -137,6 +149,8 @@ CGlassLayerSurface::EMaskSource CGlassLayerSurface::resolveMaskSource() const {
             return EMaskSource::ALPHA_THRESHOLD;
         case ELayerMaskMode::REGION:
             return (hasEffect && !regionEmpty) ? EMaskSource::PROTOCOL_REGION : EMaskSource::NONE;
+        case ELayerMaskMode::CONTOUR:
+            return g_pGlobalState->contourUnavailable ? EMaskSource::ALPHA_THRESHOLD : EMaskSource::CONTOUR;
         case ELayerMaskMode::AUTO:
         default:
             if (hasEffect)
@@ -268,14 +282,59 @@ void CGlassLayerSurface::markBackgroundDirty() {
     const auto& config = g_pGlobalState->config;
     const int64_t fps = config.layersLiveResampleFps ? **config.layersLiveResampleFps : 0;
     const auto now = std::chrono::steady_clock::now();
-    if (fps > 0 && now - m_lastDirtyMark < std::chrono::nanoseconds(1'000'000'000 / fps))
-        return;
+    if (fps > 0) {
+        const auto interval = std::chrono::nanoseconds(1'000'000'000 / fps);
+        if (now - m_lastDirtyMark < interval) {
+            m_deferredResampleAt = m_lastDirtyMark + interval;
+            BackgroundDamageObserver::deferResample(*m_deferredResampleAt);
+            return;
+        }
+    }
+    m_deferredResampleAt.reset();
     m_lastDirtyMark = now;
 
     m_backgroundDirty = true;
     // damage the full sample region: outside the committed area the framebuffer
     // still holds our previous glass output, which must not be re-sampled
     damageSampleRegion();
+}
+
+void CGlassLayerSurface::markContourContentChanged() {
+    switch (m_contour.invalidate(std::chrono::steady_clock::now())) {
+        case Contour::CField::EInvalidation::Now:
+            // the field is rebuilt from a frame that redraws the whole layer
+            damageSampleRegion();
+            break;
+        case Contour::CField::EInvalidation::Deferred:
+            BackgroundDamageObserver::deferResample(*m_contour.deferredAt());
+            break;
+        case Contour::CField::EInvalidation::None:
+            break;
+    }
+}
+
+void CGlassLayerSurface::flushDeferredResample(std::chrono::steady_clock::time_point now) {
+    switch (m_contour.flushDeferred(now)) {
+        case Contour::CField::EInvalidation::Now:
+            damageSampleRegion();
+            break;
+        case Contour::CField::EInvalidation::Deferred:
+            BackgroundDamageObserver::deferResample(*m_contour.deferredAt());
+            break;
+        case Contour::CField::EInvalidation::None:
+            break;
+    }
+
+    if (!m_deferredResampleAt)
+        return;
+
+    if (now < *m_deferredResampleAt) {
+        BackgroundDamageObserver::deferResample(*m_deferredResampleAt);
+        return;
+    }
+
+    m_deferredResampleAt.reset();
+    markBackgroundDirty();
 }
 
 void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha, bool xray) {
@@ -304,18 +363,16 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha, bool
     // computed once here and reused by compositeAndRestore()'s regionRects
     // upload later this same frame — never widens boundingBox() or the
     // composite draw, which stay full-layer (see their own resolveMaskSource()
-    // call sites elsewhere in this file). m_cachedRegionSampleBox is likewise
-    // reused by compositeAndRestore() to build the sampleUVOffset/uvScale
-    // uniforms that reconcile the (region-shrunk) sample box against the
-    // full-layer quad UV — see toSampleBoxUV() in Shaders.hpp.
+    // call sites elsewhere in this file). regionSampleBox becomes
+    // m_cachedRegionSampleBox only when the sample is actually taken below.
     const bool isRegionMode = resolveMaskSource() == EMaskSource::PROTOCOL_REGION;
     m_cachedTransformedRegion = isRegionMode ? transformedBlurRegion(monitor, *layerBox) : CRegion{};
     const std::optional<CBox> regionSampleBox = isRegionMode ? regionBoundingBoxAbsolute(monitor, *layerBox) : std::nullopt;
     // A region resize/move is otherwise invisible to backgroundChanged below (a
     // layer's own commit doesn't mark itself dirty) — without this the mask
     // shape would update immediately while the sample stays from the old box.
-    const bool regionBoxChanged = isRegionMode && regionSampleBox != m_cachedRegionSampleBox;
-    m_cachedRegionSampleBox = regionSampleBox;
+    // Also true leaving region mode: the cached texture is still region-shrunk.
+    const bool regionBoxChanged = regionSampleBox != m_cachedRegionSampleBox;
 
     // Brackets everything below, including the conditional resample and the
     // temp-FBO redirect/clear that always runs: GL forbids a concurrent
@@ -375,6 +432,8 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha, bool
         int downscale        = blurStrength >= GlassRenderer::BLUR_DOWNSCALE_THRESHOLD ? GlassRenderer::BLUR_DOWNSCALE_MAX : 1;
 
         GlassRenderer::sampleBackground(m_sampleFramebuffer, xray ? snapshot : source, sampleBox, m_samplePaddingRatio, downscale);
+        // only here: a deferred or cached frame keeps compositing the old texture
+        m_cachedRegionSampleBox = regionSampleBox;
 
         float blurRadius     = blurStrength * 12.0f / downscale;
         int blurIterations   = std::clamp(static_cast<int>(resolvePresetInt(ctx, &SPresetValues::blurIterations, &SOverridableConfig::blurIterations)), 1, 5);
@@ -440,6 +499,66 @@ void CGlassLayerSurface::sampleAndRedirect(PHLMONITOR monitor, float alpha, bool
     m_redirectedThisFrame = true;
 }
 
+bool CGlassLayerSurface::attachContour(PHLMONITOR monitor, const CBox& transformBox, float alpha, float maskThreshold,
+                                       const SResolveContext& ctx, GlassRenderer::SMaskInfo& maskInfo) {
+    if (g_pGlobalState->contourUnavailable)
+        return false;
+
+    const auto target = g_pHyprRenderer->m_renderData.currentFB;
+    if (!target || !m_surfaceTempFramebuffer || !monitor)
+        return false;
+
+    const int   boxWidth  = static_cast<int>(transformBox.w);
+    const int   boxHeight = static_cast<int>(transformBox.h);
+    const float scale     = monitor->m_scale > 0.0f ? monitor->m_scale : 1.0f;
+
+    // The shader's own bezel and bevel widths, in the same units: they set how far the field reaches.
+    const float reference = Contour::referencePx(boxWidth, boxHeight, scale);
+    const float bezelPx   = GlassRenderer::effectiveEdgeThickness(
+                              resolvePresetFloat(ctx, &SPresetValues::edgeThickness, &SOverridableConfig::edgeThickness),
+                              resolvePresetFloat(ctx, &SPresetValues::edgeThicknessPx, &SOverridableConfig::edgeThicknessPx), scale, reference) *
+                          reference;
+    const float rimPx = std::max(resolvePresetFloat(ctx, &SPresetValues::bevelSize, &SOverridableConfig::bevelSize) * scale, 1.0f);
+
+    const auto plan = Contour::makePlan(boxWidth, boxHeight, bezelPx, rimPx, scale);
+    if (!plan)
+        return false;
+
+    m_contour.request();
+
+    // Part of the box off the screen was never drawn: what the field saw there depends on where the box sits.
+    const bool onScreen = transformBox.x >= 0.0 && transformBox.y >= 0.0 && transformBox.x + transformBox.w <= target->m_size.x &&
+                          transformBox.y + transformBox.h <= target->m_size.y;
+
+    const Contour::SBuildKey key{
+        .plan        = *plan,
+        .threshold   = maskThreshold,
+        .provisional = alpha < Contour::COMPLETE_ALPHA,
+        .boxX        = onScreen ? 0 : static_cast<int>(transformBox.x),
+        .boxY        = onScreen ? 0 : static_cast<int>(transformBox.y),
+    };
+
+    if (m_contour.wantsBuild(key)) {
+        // The temp FBO only holds what this frame redrew: a field needs all of the layer in it.
+        if (GlassRenderer::damageCoversBox(transformBox, target, g_pHyprRenderer->m_renderData.damage, monitor)) {
+            if (!m_contour.build(key, m_surfaceTempFramebuffer, transformBox, alpha, target) && g_pGlobalState->contourUnavailable)
+                return false;
+        } else if (m_contour.noteUncoveredFrame())
+            damageSampleRegion();
+    }
+
+    // A stale field of the same geometry still beats the rectangle for the frame or two before the next build.
+    if (!m_contour.usableFor(*plan))
+        return false;
+
+    maskInfo.contourTextureId   = m_contour.framebuffer()->getTexture()->m_texID;
+    maskInfo.contourUVScale     = {transformBox.w / (static_cast<double>(plan->fieldWidth) * plan->divisor),
+                                   transformBox.h / (static_cast<double>(plan->fieldHeight) * plan->divisor)};
+    maskInfo.contourReferencePx = plan->referencePx;
+    maskInfo.contourReachPx     = plan->reachPx;
+    return true;
+}
+
 void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EMaskSource maskSource) {
     // Restore the original currentFB before compositing
     if (m_savedCurrentFB) {
@@ -503,13 +622,18 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
         .uvScale   = {transformBox.w / monitorWidth, transformBox.h / monitorHeight},
     };
 
+    float contourThreshold = 0.0f; // mask_threshold as configured, the key of a contour field
+
     switch (maskSource) {
+        case EMaskSource::CONTOUR: // cuts like the alpha mask: the field only shapes the edge
         case EMaskSource::ALPHA_THRESHOLD: {
             const auto& cfg     = g_pGlobalState->config;
             float maskThreshold = cfg.layersMaskThreshold ? static_cast<float>(**cfg.layersMaskThreshold) : 0.001f;
             auto threshIt = g_pGlobalState->layerNamespaceMaskThresholds.find(layerSurface->m_namespace);
             if (threshIt != g_pGlobalState->layerNamespaceMaskThresholds.end())
                 maskThreshold = threshIt->second;
+            // a NaN would never equal itself in the field's build key and rebuild it every frame
+            contourThreshold = std::isfinite(maskThreshold) ? maskThreshold : 0.001f;
 
             // The temp FBO stores the layer after Hyprland applies fade alpha. Keep
             // mask_threshold relative to the layer's content alpha, otherwise fade-out
@@ -566,26 +690,45 @@ void CGlassLayerSurface::compositeAndRestore(PHLMONITOR monitor, float alpha, EM
                 maskInfo.regionRects[0]  = {static_cast<float>(extents.x - transformBox.x), static_cast<float>(extents.y - transformBox.y),
                                              static_cast<float>(extents.w), static_cast<float>(extents.h)};
             }
-
-            // sampleAndRedirect() gave sampleBackground() the region's bounding
-            // box, smaller than the full-layer transformBox this quad draws —
-            // reconcile the quad's own UV into that smaller sample texture's
-            // normalized space before uvPadding applies (toSampleBoxUV() in
-            // Shaders.hpp). Same defensive-recompute fallback as
-            // m_cachedTransformedRegion above, guarded against a degenerate
-            // (zero-size) transformBox since it is the UV remap's denominator.
-            if (transformBox.w > 0.0 && transformBox.h > 0.0) {
-                const CBox sampleBox = m_cachedRegionSampleBox.value_or(regionBoundingBoxAbsolute(monitor, rawBox).value_or(transformBox));
-                maskInfo.sampleUVOffset = Vector2D((sampleBox.x - transformBox.x) / transformBox.w,
-                                                    (sampleBox.y - transformBox.y) / transformBox.h);
-                maskInfo.sampleUVScale  = Vector2D(sampleBox.w / transformBox.w,
-                                                    sampleBox.h / transformBox.h);
-            }
             break;
         }
         case EMaskSource::NONE:
             // hkRenderLayer takes the plain-renderLayer path for NONE; never reaches here.
             break;
+    }
+
+    // The traced outline is the glass shape: a fixed shape would only fight it, so it applies
+    // when the layer has no field (yet).
+    const bool contoured = maskSource == EMaskSource::CONTOUR && attachContour(monitor, transformBox, alpha, contourThreshold, ctx, maskInfo);
+
+    // A fixed shape replaces the layer box as the glass outline. The quad stays
+    // the layer box, so content outside the shape is still drawn, without glass.
+    if (const auto shape = contoured ? std::nullopt : resolveShape()) {
+        const double scale = monitor->m_scale;
+        CBox shapeBox{rawBox.x + shape->insetLeft * scale, rawBox.y + shape->insetTop * scale,
+                      rawBox.w - (shape->insetLeft + shape->insetRight) * scale, rawBox.h - (shape->insetTop + shape->insetBottom) * scale};
+        shapeBox.round();
+
+        // insets wider than the layer leave no shape: the whole box keeps its glass
+        if (std::isfinite(shapeBox.x) && std::isfinite(shapeBox.y) && std::isfinite(shapeBox.w) && std::isfinite(shapeBox.h) &&
+            shapeBox.w > 0.0 && shapeBox.h > 0.0) {
+            const float maxRadius = static_cast<float>(std::min(shapeBox.w, shapeBox.h)) / 2.0f;
+            cornerRadius          = shape->radius < 0.0f ? maxRadius : std::min(shape->radius * static_cast<float>(scale), maxRadius);
+
+            const CBox transformedShapeBox = transformedLayerBox(shapeBox, monitor);
+            maskInfo.glassBoxOffsetPx      = Vector2D(transformedShapeBox.x - transformBox.x, transformedShapeBox.y - transformBox.y);
+            maskInfo.glassBoxSizePx        = Vector2D(transformedShapeBox.w, transformedShapeBox.h);
+        }
+    }
+
+    // A region-mode sample covers only the region's bounding box, smaller than
+    // the full-layer quad: remap the quad UV into that texture (toSampleBoxUV()
+    // in Shaders.hpp). Keyed on the box the cached texture was taken from, not
+    // this frame's mask mode or region, which a deferred resample leaves behind.
+    if (m_cachedRegionSampleBox && transformBox.w > 0.0 && transformBox.h > 0.0) {
+        const CBox& sampleBox   = *m_cachedRegionSampleBox;
+        maskInfo.sampleUVOffset = Vector2D((sampleBox.x - transformBox.x) / transformBox.w, (sampleBox.y - transformBox.y) / transformBox.h);
+        maskInfo.sampleUVScale  = Vector2D(sampleBox.w / transformBox.w, sampleBox.h / transformBox.h);
     }
 
     // The glass shader composites both the glass effect and the surface content

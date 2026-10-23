@@ -198,10 +198,17 @@ Settings resolve through: **preset chain** (theme variant, shared, inherited) th
 | `bevel_shadow` | float | `0.0` | — | — | Darkening of the bevel line on the side away from the light (0.0-1.0) |
 | `glass_opacity` | float | `1.0` | — | — | Overall glass opacity (0.0-1.0) |
 | `edge_thickness` | float | `0.06` | — | — | Bezel width, fraction of smallest dimension (0.0-0.15) |
+| `edge_thickness_px` | float | `0.0` | — | — | Bezel width in logical pixels, the same on every window size and monitor scale. Above `0` it replaces `edge_thickness`, see [Edge thickness in pixels](#edge-thickness-in-pixels) |
+| `edge_height` | float | `0.0` | — | — | Turns the edge into a lens: a narrow, crisp bend with a flat center. Height of the glass edge in logical pixels, `0` keeps the soft edge, see [Lens edge](#lens-edge) (0-60) |
+| `fresnel_reflection` | float | `0.0` | — | — | The lens edge mirrors what is around the glass: 0 none, 1 a mirror. Needs `edge_height` (0.0-1.0) |
 | `tint_color` | color | `0x8899aa22` | — | — | Glass tint RRGGBBAA hex. Alpha = tint strength |
 | `lens_distortion` | float | `0.5` | — | — | Center dome magnification (0.0-1.0) |
 | `self_sample` | float | `0.0` | — | — | Mixes the window's own content into the glass behind it (0.0-1.0). Windows only |
 | `xray` | int | `0` | — | — | `1` hides the windows under the glass: only the wallpaper shows through. See [X-ray](#x-ray) |
+| `focus_light` | float | `0.0` | — | — | Light along the glass edge of the active window, `0` off. See [Focus light](#focus-light) (0.0-1.0). Windows only |
+| `focus_light_color` | color | `0xffffff00` | — | — | Color of the focus light; alpha sets how much it replaces white (0xRRGGBBAA) |
+| `frost` | float | `0.0` | — | — | The glass blurs further where other windows are behind it and stays clear over the wallpaper, `0` off. See [Frost](#frost) (0.0-1.0). Windows only |
+| `frost_blur` | float | `3.0` | — | — | Extra blur of the frost, in `blur_strength` units on top of it. Needs `frost` (0.5-3, at most 10: past about 3 the blur stops getting wider) |
 | `brightness` | float | — | `0.82` | `1.12` | Brightness multiplier |
 | `contrast` | float | — | `0.90` | `0.92` | Contrast around midpoint |
 | `saturation` | float | — | `0.80` | `0.85` | Desaturation (0 = grayscale, 1 = full) |
@@ -212,7 +219,7 @@ Settings resolve through: **preset chain** (theme variant, shared, inherited) th
 
 `—` in Global Default = falls through to per-theme default. `—` in Dark/Light = inherits global value.
 
-Ranges in parentheses are the usual span, not limits: only `blur_iterations` and `self_sample` are clamped, and the built-in presets go past some of them (`glass` uses `refraction_strength = 8.0`).
+Ranges in parentheses are the usual span, not limits: only `blur_iterations`, `self_sample`, `focus_light`, `frost`, `fresnel_reflection`, `edge_thickness_px` (at most half the smaller side) and `edge_height` (at most 500) are clamped, and the built-in presets go past some of them (`glass` uses `refraction_strength = 8.0`).
 
 #### Self sampling
 
@@ -300,6 +307,130 @@ preset = name:frosted, inherits:subtle, noise_strength:0.5
 
 - The built-in `clear` preset turns the grain off, as it does the blur
 
+#### Edge thickness in pixels
+
+`edge_thickness` is a fraction of the window's smaller side, so big windows get a wide edge and small ones a thin edge. `edge_thickness_px` gives every window the same edge width, in logical pixels. `0` (default) keeps `edge_thickness`.
+
+**On the fly:**
+```bash
+hyprctl keyword plugin:hyprglass:edge_thickness_px 12
+```
+
+**Lua:**
+```lua
+hg.config({ edge_thickness_px = 12 })
+hg.preset("relative", { inherits = "glass", edge_thickness_px = 0 })   -- back to edge_thickness
+```
+
+**Legacy .conf:**
+```ini
+edge_thickness_px = 12
+preset = name:relative, inherits:glass, edge_thickness_px:0
+```
+
+- Applies to windows, layers and subsurface items
+- Never wider than half the smaller side of the glass: the window, the layer, or a subsurface item's shape
+
+#### Lens edge
+
+`edge_height` turns the soft edge into a lens, like the rim of a thick glass pane: a narrow, crisp bend with a perfectly flat center. It is the height of the glass at the edge, in logical pixels: higher bends more. `0` (default) keeps the soft edge. The lens is as wide as the edge (`edge_thickness`, or `edge_thickness_px` when set).
+
+`fresnel_reflection` makes the lens edge mirror what is around the glass, most where the edge is steepest: `0` none, `1` a mirror. It needs `edge_height` above `0`.
+
+**On the fly:**
+```bash
+hyprctl keyword plugin:hyprglass:edge_height 30
+hyprctl keyword plugin:hyprglass:fresnel_reflection 0.4
+```
+
+**Lua:**
+```lua
+hg.config({ edge_height = 30, edge_thickness_px = 20, fresnel_reflection = 0.4 })
+hg.preset("lens", { inherits = "clear", edge_height = 30, edge_thickness_px = 20 })
+```
+
+**Legacy .conf:**
+```ini
+edge_height = 30
+edge_thickness_px = 20
+fresnel_reflection = 0.4
+preset = name:lens, inherits:clear, edge_height:30, edge_thickness_px:20
+```
+
+- Shows best on clear or lightly blurred glass over busy content (text, other windows); strong blur hides it
+- `refraction_strength` sets how much it bends (`0.6` bends like real glass) and `chromatic_aberration` its rainbow, which shows only where the edge is steep. `refraction_flow` and `refraction_spread` do not apply to it
+- A narrow edge looks best: try `edge_thickness_px` 16-24 with `edge_height` 20-40
+- Square and tight corners bend less than the straight edges
+- Applies to windows, layers and subsurface items
+
+**Cost:** none while `edge_height` is `0`. Above `0`, a little extra GPU work on the edge only.
+
+#### Focus light
+
+`focus_light` lights the glass edge of the active window all the way round: a bright line just inside the edge over a soft sheen, brightest on the side the bevel light comes from (`bevel_angle`). `0` (default) turns it off. When focus moves, the light fades over to the new window.
+
+**On the fly:**
+```bash
+hyprctl keyword plugin:hyprglass:focus_light 0.8
+hyprctl keyword plugin:hyprglass:focus_light_color 0x66b3ffff
+```
+
+**Lua:**
+```lua
+hg.config({ focus_light = 0.8, focus_light_color = 0x66b3ffff })
+hg.preset("terminal", { inherits = "clear", focus_light = 1.0 })
+```
+
+**Legacy .conf:**
+```ini
+focus_light = 0.8
+focus_light_color = 0x66b3ffff
+preset = name:terminal, inherits:clear, focus_light:1.0
+```
+
+- Visible through translucent windows only: the glass sits under the window
+- With `border_size = 0` it can replace Hyprland's border
+- Windows only: not on layers or subsurface items, and not on fullscreen windows
+- With `animations:enabled = 0` it switches without a fade
+
+**Cost:** none while `focus_light` is `0`. Above `0`, a little extra GPU work on the active window only. When focus moves, a few redrawn frames and one extra refresh of the glass around the two windows. Nothing is redrawn while focus stays put.
+
+#### Frost
+
+`frost` blurs the glass further where other windows are behind it, and leaves it clear over the wallpaper. A floating terminal stays crisp on an empty desktop and turns into frosted glass when it slides over a browser, so the text behind never fights the text in front. `0` (default) turns it off.
+
+It is a low `blur_strength` that makes it worth it: with the default blur the glass is already frosted everywhere. Pair `frost` with a clear look, like the `clear` preset.
+
+**On the fly:**
+```bash
+hyprctl keyword plugin:hyprglass:frost 1.0
+hyprctl keyword plugin:hyprglass:frost_blur 2.0
+```
+
+**Lua:**
+```lua
+hg.config({ frost = 1.0, frost_blur = 2.0 })
+hg.preset("terminal", { inherits = "clear", frost = 1.0 })
+```
+
+**Legacy .conf:**
+```ini
+frost = 1.0
+frost_blur = 2.0
+preset = name:terminal, inherits:clear, frost:1.0
+```
+
+- `frost` is how frosted the glass gets once windows cover it: `0.5` is half way between clear and fully frosted
+- `frost_blur` is the extra blur, in the same unit as `blur_strength`, on top of it
+- The glass frosts once windows behind it cover about 4% of it and is fully frosted from about 45%, fading over a fraction of a second
+- Only windows below the glass count: windows above it, and the wallpaper, do not
+- Tiled windows rarely overlap, so it mostly shows on floating windows and while windows slide
+- Windows only: layers and subsurface items ignore it, and so does a fullscreen window
+- Off with `xray = 1`, which never shows windows behind the glass
+- With `animations:enabled = 0` it switches without a fade
+
+**Cost:** none while `frost` is `0`, and none while the glass is clear over the wallpaper. While it is frosted, a little extra GPU work and a few MB of memory per glass window (freed once it is clear again), plus a few redrawn frames while it fades.
+
 ### Layer surfaces
 
 The glass effect can be applied to layer surfaces (bars, docks, widgets). **Disabled by default.**
@@ -308,11 +439,42 @@ Where the glass goes on a layer:
 - Apps that request blur through the `ext-background-effect-v1` Wayland protocol get glass exactly where they ask for it
 - Other layers get glass wherever their content is visible (alpha above `mask_threshold`), so partially transparent content (down to ~0.004 opacity) **triggers** the glass effect
 
-`mask_mode` forces one behaviour: `auto` (default), `region` (only where the app requests blur; other layers get no glass) or `alpha` (visible content only).
+`mask_mode` forces one behaviour: `auto` (default), `region` (only where the app requests blur; other layers get no glass), `alpha` (visible content only) or `contour` (visible content, with the edge following the shapes the app draws, see below).
 
 **Caveat:** Layer shadows count as visible content. Use `mask_threshold` to set an alpha cutoff higher than your shadow opacity. Set it once for every layer with `layers:mask_threshold`; a per-layer value wins.
 
 **Soft edges:** `mask_feather` fades the glass in over that much alpha above `mask_threshold`, so antialiased rounded corners blend instead of stepping. Content fainter than `mask_threshold + mask_feather` then gets lighter glass: keep `0` (default) for near-transparent bars. Only applies where glass follows visible content, not to the region an app requests.
+
+**Contour:** with `mask_mode = contour` every shape the app draws gets its own edge, bend and highlights, instead of the layer's rectangle getting them: a stack of notifications, a card in a full-screen overlay, a floating pill. The glass goes where the content is visible, like `alpha`, so `mask_threshold` is the cutoff of the outline: set it above the opacity of the app's shadows (`0.1` to `0.3`) so a shadow does not count as part of the shape. A full-width bar looks the same as with `alpha`.
+
+```ini
+plugin:hyprglass {
+    layers {
+        enabled = 1
+        mask_threshold = 0.15
+        namespace_mask_modes = swaync=contour, quickshell:notifications=contour
+    }
+}
+```
+
+- `edge_thickness` is a fraction of the layer's shorter side, at most 160 px, here (a card in a screen-sized layer gets a card's edge); `edge_thickness_px` sets an exact width
+- `mask_feather` still softens the cut. `shape`, `refraction_flow` and `lens_distortion` do not apply
+- The outline follows the app when it redraws, at most 30 times a second
+- A layer behind an opaque window keeps the `alpha` look until it has been redrawn in full once
+- A GPU that cannot render it falls back to `alpha`, with a notification
+
+**Cost:** none for layers that do not use it. For a layer that does, one extra texture read per glass pixel, and a few short GPU passes and a few MB of memory while a contour layer exists (shared work buffers included), freed when the last one closes or stops using `contour`. `hyprctl hyprglass stats` counts the rebuilds (`contour_build`).
+
+**Fixed shape:** `shape` gives a layer's glass its own rounded box, so a floating bar or a card inside a larger layer gets its own edge, bend and highlights instead of those of the whole layer. `inset` trims the layer's edges (one value, or top, right, bottom, left) and `radius` rounds the corners, `-1` for a pill; both in logical px (up to 16384), and a negative inset reaches past that edge. Content outside the shape is still drawn, without glass. Inside it, `mask_mode` still decides where the glass goes: set the layer's `mask_threshold` to `0` to fill the whole shape.
+
+```ini
+plugin:hyprglass {
+    layers {
+        enabled = 1
+        namespace_shapes = eww-bar=6:-1, quickshell:card=24:0:24:0:16
+    }
+}
+```
 
 #### Lua config
 
@@ -325,7 +487,10 @@ hg.layer("waybar", { preset = "subtle", mask_threshold = 0.05, live_resample = f
 hg.layer("swaync")
 hg.layer("quickshell:bezel", { preset = "ui", mask_threshold = 0.3 })
 hg.layer("quickshell:bar", { mask_mode = "region" })
+hg.layer("quickshell:notifications", { mask_mode = "contour", mask_threshold = 0.15 })
 hg.layer("dock", { mask_feather = 0.45 })
+hg.layer("eww-bar", { shape = { inset = 6, radius = -1 } })                     -- pill, 6 px inside the layer
+hg.layer("quickshell:card", { shape = { inset = { 24, 0, 24, 0 }, radius = 16 } }) -- top, right, bottom, left
 hg.layer("debug-panel", { exclude = true })
 ```
 
@@ -334,8 +499,9 @@ hg.layer("debug-panel", { exclude = true })
 | `preset` | string | Preset override for this layer |
 | `mask_threshold` | float | Per-layer override of `layers:mask_threshold` |
 | `live_resample` | bool | Per-layer override of `layers:live_resample` |
-| `mask_mode` | string | `"auto"`, `"region"` or `"alpha"`. See `layers:mask_mode` |
+| `mask_mode` | string | `"auto"`, `"region"`, `"alpha"` or `"contour"`. See `layers:mask_mode` |
 | `mask_feather` | float | Per-layer override of `layers:mask_feather` |
+| `shape` | table | Fixed glass shape: `{ inset = px or { top, right, bottom, left }, radius = px }`, both optional (`0`); `radius = -1` = pill. See `layers:namespace_shapes` |
 | `exclude` | bool | Blacklist this namespace instead of whitelisting it |
 
 #### Legacy .conf config
@@ -353,10 +519,11 @@ hg.layer("debug-panel", { exclude = true })
 | `layers:live_resample` | bool | `true` (`1` in .conf) | Re-render layer glass when content behind it changes (e.g. a playing video). GPU cost scales with background activity; static scenes stay free. Overridable per layer |
 | `layers:live_resample_fps` | int | `30` | Max re-renders per second per layer for live resample. `0` = uncapped |
 | `layers:force_live_resample` | bool | `false` (`0` in .conf) | Experimental: re-render layer glass every frame regardless of changes, ignoring `live_resample_fps`. Heavy GPU/battery cost |
-| `layers:mask_mode` | string | `auto` | Where the glass goes: `auto` = where the app requests blur, else where content is visible; `region` = only where the app requests blur; `alpha` = only where content is visible |
+| `layers:mask_mode` | string | `auto` | Where the glass goes: `auto` = where the app requests blur, else where content is visible; `region` = only where the app requests blur; `alpha` = only where content is visible; `contour` = where content is visible, with the edge following each shape the app draws |
 | `layers:namespace_mask_modes` | string | `""` | Per-namespace `mask_mode` (`ns=mode` pairs, comma-separated) |
 | `layers:mask_feather` | float | `0` | Soft edges: glass fades in over this much alpha above `mask_threshold` (e.g. `0.45` for a rounded dock). `0` = hard edge. Ignored where the app requests a blur region |
 | `layers:namespace_mask_feathers` | string | `""` | Per-namespace `mask_feather` (`ns=value` pairs, comma-separated) |
+| `layers:namespace_shapes` | string | `""` | Per-namespace fixed glass shape (`ns=inset:radius` or `ns=top:right:bottom:left:radius` pairs, comma-separated, logical px). `radius` `-1` = pill. Unset = the whole layer |
 | `layers:manage_blur` | bool | `true` (`1` in .conf) | Replace Hyprland's own blur with glass on glassed layers (`layerrule = ignorealpha` then has no effect, use `mask_threshold`). Set to `0` to keep Hyprland's blur |
 
 > Layer support hooks into Hyprland's internal render pipeline. This is version-sensitive and may break across Hyprland updates.
@@ -459,7 +626,7 @@ hyprctl dispatch tagwindow +hyprglass_preset_subtle
 
 ### Presets
 
-Presets are named config overrides. They can be **built-in** or **user-defined**. User presets with the same name override built-in ones.
+Presets are named config overrides. They can be **built-in** or **user-defined**. A user preset with the same name as a built-in one extends it: the options you set replace the built-in values, the others keep them.
 
 Each preset can have shared values (theme-agnostic), a dark variant, a light variant, and can inherit from another preset.
 
@@ -512,7 +679,7 @@ The window/layer is modeled as a **thick convex glass slab**. The rendering pipe
 
 1. **Background sampling** — The framebuffer behind the window is captured with padding (content beyond the window boundary is included). `self_sample` mixes the window's own content into this capture.
 2. **Gaussian blur** — Multi-pass two-pass (horizontal + vertical) Gaussian blur for the frosted look.
-3. **Glass height field** — An SDF-based height profile: 1.0 deep inside the window, smooth S-curve to 0.0 at the edge. The transition width is `edge_thickness`.
+3. **Glass height field** — An SDF-based height profile: 1.0 deep inside the window, smooth S-curve to 0.0 at the edge. The transition width is `edge_thickness` (or `edge_thickness_px` when set).
 4. **Edge refraction** — The height field gradient drives UV displacement. At the center the gradient is near-zero (no distortion). At the edges the gradient is steep, pushing sample UVs outward — pulling in content from beyond the window boundary. This creates natural color bleeding.
 5. **Chromatic aberration** — R, G, B channels are sampled with slightly different refraction scales (blue bends more), creating spectral fringing at edges.
 6. **Center dome lens** — Subtle barrel magnification in the flat interior, controlled by `lens_distortion`.
@@ -563,7 +730,7 @@ hyprglass 0.9.1: active
 | `version` | Same as `hyprctl plugin list`. |
 | `versionCheck` | `match` (built for this Hyprland), `unknown` (Hyprland or hyprglass was built without a release tag or commit: only Hyprland's libraries were checked) or `skipped` (`HYPRGLASS_SKIP_VERSION_CHECK`). |
 | `active` | `true` when at least one feature is active. |
-| `shaders` | `ready`, `pending` (compiled at the first glass draw) or `failed` (retried at the next draw). |
+| `shaders` | `ready`, `pending` (compiled at the first glass draw) or `failed` (glass stays off until the plugin is reloaded). |
 | `itemProtocol` | `hyprglass_item_v1` is offered to clients. |
 | `features.*.enabled` | The setting: `enabled`, `layers:enabled`, `subsurfaces:enabled`. |
 | `features.*.active` | The feature draws glass. `windows` is active with `enabled = 0` while a window tagged `hyprglass_enabled` is open. |
@@ -595,8 +762,8 @@ hyprctl -j hyprglass stats       # same, as JSON
 hyprglass stats
   stage timers: off (plugin:hyprglass:debug:timers = 0)
 
-  monitor        frames  win_draws  opaque_skip  win_hit  win_miss  win_defer  win_disc  layer_draws  layer_hit  layer_miss  layer_defer  sub_draws  sub_hit  sub_miss  sub_defer  xray_copy  xray_defer  xray_evict  blur_pass  sampled_mpx  glass_mpx
-  eDP-1            7212       3401         5122     3120       240         41         0         1560       1420          92            3        410      380        22          8          0           0           0       5520        41.30      18.77
+  monitor        frames  win_draws  opaque_skip  win_hit  win_miss  win_defer  win_disc  layer_draws  layer_hit  layer_miss  layer_defer  sub_draws  sub_hit  sub_miss  sub_defer  xray_copy  xray_defer  xray_evict  blur_pass  sampled_mpx  glass_mpx  frost_build  contour_build
+  eDP-1            7212       3401         5122     3120       240         41         0         1560       1420          92            3        410      380        22          8          0           0           0       5520        41.30      18.77            0              0
   eDP-1          per frame: 0.47 win draws, 0.22 layer draws, 0.06 sub draws, 0.77 blur passes, 0.006 sampled mpx, 0.003 glass mpx
 ```
 

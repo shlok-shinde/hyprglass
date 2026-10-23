@@ -27,6 +27,7 @@
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
 #include <hyprland/src/desktop/view/WLSurface.hpp>
 #include <hyprland/src/helpers/time/Time.hpp>
+#include <hyprland/src/managers/SessionLockManager.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
 #include <hyprland/src/plugins/PluginAPI.hpp>
 #include <hyprland/src/render/Renderer.hpp>
@@ -343,6 +344,22 @@ static void parseLayerNamespaceFilters() {
     parseKeyValuePairs(config.layersNamespaceMaskFeathers, '=', [&](const std::string& ns, const std::string& val) {
         try { g_pGlobalState->layerNamespaceMaskFeathers.emplace(ns, std::stof(val)); } catch (...) {}
     });
+
+    g_pGlobalState->layerNamespaceShapes.clear();
+    std::string invalidShapes;
+    parseKeyValuePairs(config.layersNamespaceShapes, '=', [&](const std::string& ns, const std::string& val) {
+        if (const auto shape = parseLayerShape(val))
+            g_pGlobalState->layerNamespaceShapes[ns] = *shape;
+        else
+            invalidShapes += (invalidShapes.empty() ? "" : ", ") + ns + "=" + val;
+    });
+    if (!invalidShapes.empty()) {
+        HyprlandAPI::addNotificationV2(PHANDLE, {
+            {"text", "[hyprglass] Ignoring layers:namespace_shapes " + invalidShapes + ": expected ns=inset:radius or ns=top:right:bottom:left:radius."},
+            {"time", (uint64_t)5000},
+            {"color", CHyprColor{1.0, 0.8, 0.2, 1.0}},
+        });
+    }
 }
 
 static bool shouldGlassLayer(PHLLS layerSurface) {
@@ -442,6 +459,41 @@ static void refreshSurfaceObserver() {
 
 using renderLayerFn = void (*)(Render::IHyprRenderer*, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool);
 
+// Mirrors renderLayer()'s abovelock early-out: while locked, every layer is
+// offered twice per frame (workspace pass, then the lockscreen pass) and
+// Hyprland draws it in only one of them. Glass queued for the other has no
+// surface over it: region-mode glass would then paint over the lock screen.
+static bool layerSkippedForLock(const PHLLS& layerSurface, bool lockscreen) {
+    if (!layerSurface)
+        return true;
+
+    const bool aboveLock = layerSurface->m_ruleApplicator->aboveLock().valueOrDefault();
+    if (lockscreen)
+        return !aboveLock;
+
+    return aboveLock && g_pSessionLockManager && g_pSessionLockManager->isSessionLocked();
+}
+
+// Frees the contour fields of layers no longer drawn with contour, or every field with
+// `everything`.
+static void releaseContourFields(bool everything) {
+    if (!g_pGlobalState)
+        return;
+
+    const auto& config = g_pGlobalState->config;
+    const bool  layersOn = config.layersEnabled && **config.layersEnabled;
+    for (const auto& [raw, state] : g_pGlobalState->layerSurfaces) {
+        if (!state || !state->holdsContour())
+            continue;
+
+        const auto layerSurface = state->getLayerSurface();
+        const bool stale = everything || !layersOn || !layerSurface || !shouldGlassLayer(layerSurface) ||
+                           state->resolveMaskSource() != CGlassLayerSurface::EMaskSource::CONTOUR;
+        if (stale)
+            state->releaseContour();
+    }
+}
+
 static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PHLMONITOR monitor,
                            const Time::steady_tp& now, bool popups, bool lockscreen) {
     const auto& config = g_pGlobalState->config;
@@ -468,11 +520,20 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         return;
     }
 
+    if (layerSkippedForLock(layerSurface, lockscreen)) {
+        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+        return;
+    }
+
     // Prune dead layer surfaces whose weak_ptr has expired (layer was destroyed
     // but never got a replacement at the same raw pointer address)
     std::erase_if(g_pGlobalState->layerSurfaces, [](const auto& pair) {
         return !pair.second->getLayerSurface();
     });
+
+    // layers:enabled can be turned off by hyprctl keyword without a config reload: the fields go with it
+    if (g_pGlobalState->contourScratch.users > 0 && !(config.layersEnabled && **config.layersEnabled))
+        releaseContourFields(true);
 
     // Only inject glass on the main surface pass, not popups
     if (!popups && config.layersEnabled && **config.layersEnabled && shouldGlassLayer(layerSurface)) {
@@ -488,6 +549,7 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         }
 
         if (!layerSurface->m_mapped) {
+            it->second->releaseContour();
             ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
             return;
         }
@@ -501,6 +563,9 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         // nothing to glass this frame (region mode without a bound region, or an
         // explicit empty region): render as Hyprland normally would
         const auto maskSource = it->second->resolveMaskSource();
+        // a layer that was drawn with contour and no longer is gives its field back
+        if (maskSource != CGlassLayerSurface::EMaskSource::CONTOUR)
+            it->second->releaseContour();
         if (maskSource == CGlassLayerSurface::EMaskSource::NONE) {
             ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
             return;
@@ -826,7 +891,14 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         if (w) if (auto mon = w->m_monitor.lock()) g_pGlobalState->bumpSceneGeneration(mon);
     };
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.window.active.listen(
-        [=](PHLWINDOW w, Desktop::eFocusReason) { bumpWindowMonitor(w); }));
+        [=](PHLWINDOW w, Desktop::eFocusReason) {
+            bumpWindowMonitor(w);
+            // the window losing focus is not named: every decoration checks
+            for (const auto& decoration : g_pGlobalState->decorations) {
+                if (auto* deco = decoration.get())
+                    deco->onActiveWindowChanged(w);
+            }
+        }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.window.fullscreen.listen(
         [=](PHLWINDOW w) {
             bumpWindowMonitor(w);
@@ -882,6 +954,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         parseLayerNamespaceFilters();
         commitPendingLayers(); // merge Lua layer() calls on top of string config
         validateConfig();
+        // a layer namespace or mask mode that no longer asks for contour keeps no field
+        releaseContourFields(false);
         // config values are only final here: Hyprland reloads the config after PLUGIN_INIT returns
         refreshSurfaceObserver();
         notifySubsurfaceHookFailure();

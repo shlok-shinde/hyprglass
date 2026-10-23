@@ -1,9 +1,11 @@
 #pragma once
 
+#include "Frost.hpp"
 #include "GlassRenderer.hpp"
 #include "PluginConfig.hpp"
 
 #include <chrono>
+#include <optional>
 #include <hyprland/src/desktop/view/Window.hpp>
 #include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
@@ -33,6 +35,14 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // decoration whose padded box overlaps a commit from outside the
     // window's own surface tree.
     void markBackgroundDirty();
+
+    // Applies a mark markBackgroundDirty() owed under the rate limit once its
+    // deadline passed, or re-arms the shared timer for it.
+    void flushDeferredResample(std::chrono::steady_clock::time_point now);
+
+    // Hyprland's active window changed (window.active, every decoration): starts
+    // the focus light's fade and damages the glass if it is lit.
+    void onActiveWindowChanged(const PHLWINDOW& activeWindow);
 
     // Pure predicate: true when the cached sample must not be reused as-is
     // this frame. Called identically from CGlassPassElement::needsLiveBlur()
@@ -73,6 +83,8 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // must not reuse a sample of the other.
     bool m_cachedFromSnapshot = false;
     std::chrono::steady_clock::time_point m_lastDirtyMark{};
+    // A mark the rate limit held back: the last change of a burst must still land.
+    std::optional<std::chrono::steady_clock::time_point> m_deferredResampleAt;
 
     // Scene generation at the last real sample, plus the monitor it was
     // captured against. SGlobalState::sceneGeneration is deliberately keyed
@@ -96,6 +108,30 @@ class CGlassDecoration : public IHyprWindowDecoration {
     bool m_glassWasEnabled = false;
 
     float m_lastSelfSample = 0.0f;
+
+    // Focus light: whether this is the active window, and the fade the last
+    // change started (from its level then, at that time).
+    bool                                  m_focusLightTarget = false;
+    float                                 m_focusLightFrom   = 0.0f;
+    std::chrono::steady_clock::time_point m_focusLightChangedAt{};
+    // focus_light as of the last rendered frame, 0 when it, or the glass, is off.
+    float m_lastFocusLightStrength = 0.0f;
+    // What draw() folded into the render-order fingerprint this frame said the
+    // fade was still running: renderPass() keeps frames coming until draw()
+    // sees it settled, so the settled light bumps the scene once and glass
+    // stacked above resamples it.
+    bool m_focusLightFadingAtDraw = false;
+
+    [[nodiscard]] bool  focusLightFading(std::chrono::steady_clock::time_point now) const;
+    [[nodiscard]] float focusLightLevel(std::chrono::steady_clock::time_point now) const;
+    void                damageFocusLight();
+
+    // Frost: the eased amount and the frosted copy of the sample (see Frost.hpp).
+    Frost::CFrostState m_frost;
+    MONITORID          m_frostMonitor = -1; // the monitor the amount was last stepped for
+
+    // Damages the glass box only: frost changes how the cached sample is drawn, not the sample.
+    void damageFrost();
 
     // Frame serial the last glass element was queued for, and its index in that
     // frame. Hyprland renders a floating window over fullscreen more than once
