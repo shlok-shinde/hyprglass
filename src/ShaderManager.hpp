@@ -104,7 +104,8 @@ struct SGlassUniforms {
 };
 
 struct SGenieUniforms {
-    GLint fbSize   = -1;
+    GLint outBox   = -1;
+    GLint inBox    = -1;
     GLint srcBox   = -1;
     GLint target   = -1;
     GLint progress = -1;

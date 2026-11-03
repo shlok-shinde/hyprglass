@@ -744,8 +744,9 @@ precision highp float;
  */
 
 uniform sampler2D tex;
-uniform vec2  fbSize;     // framebuffer pixels
-uniform vec4  srcBox;     // window: x, y, w, h
+uniform vec4  outBox;     // the monitor pixels this output covers: x, y, w, h
+uniform vec4  inBox;      // where the window's texture starts on the monitor, and its size
+uniform vec4  srcBox;     // window: x, y, w, h (monitor pixels, as everything below)
 uniform vec3  target;     // x0, x1, y of the line the window vanishes into
 uniform float progress;
 
@@ -753,7 +754,7 @@ in vec2 v_texcoord;
 layout(location = 0) out vec4 fragColor;
 
 void main() {
-    vec2  P  = v_texcoord * fbSize;
+    vec2  P  = outBox.xy + v_texcoord * outBox.zw;
     float x0 = srcBox.x, x1 = srcBox.x + srcBox.z;
     float y0 = srcBox.y, y1 = srcBox.y + srcBox.w;
     float H  = srcBox.w;
@@ -780,7 +781,7 @@ void main() {
     if (sSrc < 0.0 || sSrc > H) { fragColor = vec4(0.0); return; }
 
     vec2 src = vec2(mix(x0, x1, u), yFar + dir * sSrc);
-    vec4 c   = texture(tex, src / fbSize);
+    vec4 c   = texture(tex, (src - inBox.xy) / inBox.zw);
 
     float side = smoothstep(0.0, 1.5 / width, u) * smoothstep(0.0, 1.5 / width, 1.0 - u);
     float sink = 1.0 - bend * smoothstep(S - max(0.05 * S, 10.0), S, s);   // dissolve into the target

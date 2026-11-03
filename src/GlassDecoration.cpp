@@ -14,7 +14,8 @@
 
 #include <algorithm>
 #include <GLES3/gl32.h>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/desktop/rule/windowRule/WindowRuleApplicator.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/managers/fullscreen/FullscreenController.hpp>
@@ -102,7 +103,7 @@ static constexpr std::chrono::milliseconds FOCUS_LIGHT_FADE{200};
 // Hyprland's animations:enabled; a key that cannot be read counts as on.
 static bool hyprlandAnimationsEnabled() {
     const auto& pointer = g_pGlobalState->config.animationsEnabled;
-    return !pointer.dataptr || readIntegerConfig(pointer) != 0;
+    return !pointer.dataptr || readBoolConfig(pointer);
 }
 
 bool CGlassDecoration::focusLightFading(std::chrono::steady_clock::time_point now) const {
@@ -151,7 +152,7 @@ void CGlassDecoration::onActiveWindowChanged(const PHLWINDOW& activeWindow) {
 
     // a hidden workspace keeps its last strength; renderPass() damages it once shown
     const auto window = m_window.lock();
-    if (m_lastFocusLightStrength > 0.0f && window && window->m_workspace && window->m_workspace->isVisible())
+    if (m_lastFocusLightStrength > 0.0f && window && window->m_workspace && window->m_workspace->visible())
         damageFocusLight();
 }
 
@@ -181,7 +182,7 @@ CGlassDecoration::EEnabledResolution CGlassDecoration::resolveEnabled() const {
         // Nothing behind an opaque window is visible, unless the window
         // self-samples: then the glass shows the window's own content, which
         // does change, so the opaque-skip must yield to it.
-        if (skipOpaque && window && window->opaque()) {
+        if (skipOpaque && window && window->presentation().opaque()) {
             const bool         isDark = resolveThemeIsDark();
             const std::string  preset = resolvePresetName();
             const SResolveContext ctx = {preset, isDark, config, g_pGlobalState->customPresets};
@@ -253,7 +254,7 @@ SDecorationPositioningInfo CGlassDecoration::getPositioningInfo() {
 
 void CGlassDecoration::onPositioningReply(const SDecorationPositioningReply& reply) {}
 
-void CGlassDecoration::queueGlassPass(float alpha, bool xray) {
+void CGlassDecoration::queueGlassPass(Render::CRenderContext& ctx, float alpha, bool xray) {
     // A duplicate copy is redirected into the dedupe sink and dropped whole: it
     // needs no glass, and stamping it would leave the surviving element stale.
     if (g_pGlobalState->dedupe.guard)
@@ -264,8 +265,8 @@ void CGlassDecoration::queueGlassPass(float alpha, bool xray) {
 
     // Only the real monitor pass is de-duplicated: snapshots, screencopy and
     // overview framebuffers render the window once, out of frame order.
-    const bool managed = g_pGlobalState->frameSerial != 0 && !g_pHyprRenderer->m_bRenderingSnapshot &&
-        g_pHyprRenderer->m_renderData.projectionType == Render::RPT_MONITOR;
+    const bool managed = g_pGlobalState->frameSerial != 0 && !ctx.m_renderingSnapshot &&
+        ctx.m_data.projectionType == Render::RPT_MONITOR;
 
     if (managed) {
         if (m_glassFrameSerial != g_pGlobalState->frameSerial) {
@@ -278,12 +279,15 @@ void CGlassDecoration::queueGlassPass(float alpha, bool xray) {
         data.queueIndex  = m_glassQueueIndex;
     }
 
-    // m_renderPass, never addPassElement: draw() runs inside Hyprland's own
-    // per-window redirect for transformed windows (motion blur), whose pass
-    // renders into a work buffer cleared to transparent — nothing to sample.
+    // The pass current at RENDER_PRE_WINDOW, not the one current now: draw() runs inside
+    // Hyprland's redirect for transformed windows (wobble, motion blur), whose nested
+    // pass renders into a work buffer cleared to transparent, so there is nothing to
+    // sample. A plugin's own redirect around renderWindow still receives it.
     // The genie is the exception: the glass has to travel with the window into
     // the lamp, and it draws from its cached backdrop meanwhile (see
     // wantsBackgroundResample), so it joins the redirected pass.
+    const auto windowPass = g_pGlobalState->dedupe.windowPass;
+    auto&      outerPass  = windowPass ? *windowPass : g_pHyprRenderer->currentPass(ctx);
     if (Genie::isAnimating(m_window.lock())) {
         // A window opening out of the lamp has no backdrop cached yet. Take it
         // now, from the real framebuffer under the window's place: this element
@@ -292,49 +296,58 @@ void CGlassDecoration::queueGlassPass(float alpha, bool xray) {
             CGlassPassElement::SGlassPassData prime{m_self, alpha};
             prime.sampleOnly = true;
             prime.xray       = xray;  // (a cache taken otherwise would be resampled mid-flight)
-            g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassPassElement>(prime));
+            outerPass.add(makeUnique<CGlassPassElement>(prime));
         }
-        g_pHyprRenderer->addPassElement(makeUnique<CGlassPassElement>(data));
+        g_pHyprRenderer->addPassElement(ctx, makeUnique<CGlassPassElement>(data));
     } else
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassPassElement>(data));
+        outerPass.add(makeUnique<CGlassPassElement>(data));
 }
 
-void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
+// Render-order fingerprint: fold this window's identity/geometry/alpha into
+// the monitor's running hash in z-order, before resolveEnabled() so background
+// windows still count. Guarded by isForeignRender(), not a bare mainFB check,
+// since a foreign replay's z-order isn't this frame's real one. Folded at most
+// once per frameSerial: draw() itself runs 2-3x per monitor frame for a floating
+// window over fullscreen, and folding every copy would make the hash depend on
+// how many of those copies happened to render this frame rather than on the scene.
+void CGlassDecoration::foldRenderFingerprint(Render::CRenderContext& ctx, const PHLMONITOR& monitor, float alpha) {
+    if (!g_pGlobalState || !monitor || RenderGuards::isForeignRender(ctx))
+        return;
+
+    if (g_pGlobalState->frameSerial != 0 && m_lastFoldedFrameSerial == g_pGlobalState->frameSerial)
+        return;
+
+    const auto window = m_window.lock();
+    if (!window)
+        return;
+
+    const auto workspace = window->m_workspace;
+    const Vector2D workspaceRenderOffset =
+        (workspace && !(window->m_state & Desktop::View::WINDOW_STATE_PINNED)) ? workspace->m_renderOffset->value() : Vector2D();
+    const auto fullscreenMode = Fullscreen::controller()->getFullscreenModes(window).internal;
+
+    auto& fingerprint = g_pGlobalState->renderFingerprints[monitor->m_id];
+    Hash::hashCombine(fingerprint.runningHash, window.get(), window->positionAnimation()->value(),
+                       window->sizeAnimation()->value(), alpha, fullscreenMode, workspaceRenderOffset);
+
+    // The fade itself is not folded, only its start and its end: glass
+    // stacked above resamples the settled light, not every fade step.
+    m_focusLightFadingAtDraw = m_lastFocusLightStrength > 0.0f && focusLightFading(std::chrono::steady_clock::now());
+    if (m_lastFocusLightStrength > 0.0f)
+        Hash::hashCombine(fingerprint.runningHash, m_focusLightFadingAtDraw ? 2 : static_cast<int>(m_focusLightTarget));
+
+    // Same for frost: glass stacked above resamples where the ease starts and where it ends.
+    if (m_frost.moving() || m_frost.amount() > 0.0f)
+        Hash::hashCombine(fingerprint.runningHash, m_frost.moving() ? 2 : 1);
+
+    m_lastFoldedFrameSerial = g_pGlobalState->frameSerial;
+}
+
+void CGlassDecoration::draw(Render::CRenderContext& ctx, PHLMONITOR monitor, float const& alpha, const Render::SWindowRenderPresentation&) {
     if (!g_pGlobalState)
         return;
 
-    // Render-order fingerprint: fold this window's identity/geometry/alpha into
-    // the monitor's running hash in z-order, before resolveEnabled() so background
-    // windows still count. Guarded by isForeignRender(), not a bare mainFB check,
-    // since a foreign replay's z-order isn't this frame's real one. Folded at most
-    // once per frameSerial: draw() itself runs 2-3x per monitor frame for a floating
-    // window over fullscreen, and folding every copy would make the hash depend on
-    // how many of those copies happened to render this frame rather than on the scene.
-    if (monitor && !RenderGuards::isForeignRender() &&
-        (g_pGlobalState->frameSerial == 0 || m_lastFoldedFrameSerial != g_pGlobalState->frameSerial)) {
-        if (const auto window = m_window.lock()) {
-            const auto workspace = window->m_workspace;
-            const Vector2D workspaceRenderOffset =
-                (workspace && !window->m_pinned) ? workspace->m_renderOffset->value() : Vector2D();
-            const auto fullscreenMode = Fullscreen::controller()->getFullscreenModes(window).internal;
-
-            auto& fingerprint = g_pGlobalState->renderFingerprints[monitor->m_id];
-            Hash::hashCombine(fingerprint.runningHash, window.get(), window->positionAnimation()->value(),
-                               window->sizeAnimation()->value(), alpha, fullscreenMode, workspaceRenderOffset);
-
-            // The fade itself is not folded, only its start and its end: glass
-            // stacked above resamples the settled light, not every fade step.
-            m_focusLightFadingAtDraw = m_lastFocusLightStrength > 0.0f && focusLightFading(std::chrono::steady_clock::now());
-            if (m_lastFocusLightStrength > 0.0f)
-                Hash::hashCombine(fingerprint.runningHash, m_focusLightFadingAtDraw ? 2 : static_cast<int>(m_focusLightTarget));
-
-            // Same for frost: glass stacked above resamples where the ease starts and where it ends.
-            if (m_frost.moving() || m_frost.amount() > 0.0f)
-                Hash::hashCombine(fingerprint.runningHash, m_frost.moving() ? 2 : 1);
-
-            m_lastFoldedFrameSerial = g_pGlobalState->frameSerial;
-        }
-    }
+    foldRenderFingerprint(ctx, monitor, alpha);
 
     const auto enabledResolution = resolveEnabled();
     const bool enabled = enabledResolution == EEnabledResolution::Enabled;
@@ -357,20 +370,20 @@ void CGlassDecoration::draw(PHLMONITOR monitor, float const& alpha) {
 
     // A foreign render must not queue a pass element at all: it would sample its own
     // framebuffer into this window's real, persistent background cache.
-    if (RenderGuards::isForeignRender())
+    if (RenderGuards::isForeignRender(ctx))
         return;
 
     const bool xray = resolveXray();
     if (xray)
         requestXraySnapshot(monitor);
 
-    queueGlassPass(alpha, xray);
+    queueGlassPass(ctx, alpha, xray);
 
     // A slide translates the scene under us without any geometry change, and
     // Hyprland's per-tick window damage carries none of our sampling padding.
     // Damage only: no cache state may be touched from a render.
     const auto window = m_window.lock();
-    if (window && !window->m_pinned) {
+    if (window && !(window->m_state & Desktop::View::WINDOW_STATE_PINNED)) {
         const auto workspace = window->m_workspace;
         if (workspace && workspace->m_renderOffset->isBeingAnimated())
             damageEntire();
@@ -418,7 +431,7 @@ void CGlassDecoration::flushDeferredResample(std::chrono::steady_clock::time_poi
     markBackgroundDirty();
 }
 
-bool CGlassDecoration::wantsBackgroundResample(PHLMONITOR monitor, const CBox& transformBox, bool xray) const {
+bool CGlassDecoration::wantsBackgroundResample(Render::CRenderContext& ctx, PHLMONITOR monitor, const CBox& windowBox, bool xray) const {
     const auto& config = g_pGlobalState->config;
     if (!config.windowsBackgroundCache || !**config.windowsBackgroundCache)
         return true; // kill switch off: exact pre-cache behavior, no other state consulted
@@ -462,21 +475,21 @@ bool CGlassDecoration::wantsBackgroundResample(PHLMONITOR monitor, const CBox& t
     if (WorkspaceAnimation::anyWorkspaceAnimating(monitor))
         return true;
 
-    const auto source = g_pHyprRenderer->m_renderData.currentFB;
+    const auto source = ctx.m_data.currentFB;
     if (!m_sampleFramebuffer || !source)
         return true;
 
     // Monitor/scale/DPI/HDR change: recompute the size sampleBackground()
     // would allocate this frame (never cached) and compare against the FBO's
     // actual size/format from the last real sample.
-    const bool isDark          = resolveThemeIsDark();
-    const std::string preset   = resolvePresetName();
-    const SResolveContext ctx  = {preset, isDark, config, g_pGlobalState->customPresets};
-    const float blurStrength   = resolvePresetFloat(ctx, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength) * tintedBlurScale();
-    const int   downscale     = blurStrength >= GlassRenderer::BLUR_DOWNSCALE_THRESHOLD ? GlassRenderer::BLUR_DOWNSCALE_MAX : 1;
+    const bool isDark                     = resolveThemeIsDark();
+    const std::string preset              = resolvePresetName();
+    const SResolveContext resolveContext  = {preset, isDark, config, g_pGlobalState->customPresets};
+    const float blurStrength              = resolvePresetFloat(resolveContext, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength) * tintedBlurScale();
+    const int   downscale                 = blurStrength >= GlassRenderer::BLUR_DOWNSCALE_THRESHOLD ? GlassRenderer::BLUR_DOWNSCALE_MAX : 1;
 
-    const int fullWidth  = static_cast<int>(transformBox.w) + 2 * GlassRenderer::SAMPLE_PADDING_PX;
-    const int fullHeight = static_cast<int>(transformBox.h) + 2 * GlassRenderer::SAMPLE_PADDING_PX;
+    const int fullWidth  = static_cast<int>(windowBox.w) + 2 * GlassRenderer::SAMPLE_PADDING_PX;
+    const int fullHeight = static_cast<int>(windowBox.h) + 2 * GlassRenderer::SAMPLE_PADDING_PX;
     const int requiredWidth  = std::max(1, fullWidth / downscale);
     const int requiredHeight = std::max(1, fullHeight / downscale);
 
@@ -487,13 +500,13 @@ bool CGlassDecoration::wantsBackgroundResample(PHLMONITOR monitor, const CBox& t
     return false;
 }
 
-void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool xray, bool sampleOnly) {
+void CGlassDecoration::renderPass(Render::CRenderContext& ctx, PHLMONITOR monitor, const float& alpha, bool xray, bool sampleOnly) {
     // Belt and braces: draw() already refuses to queue a pass element for a foreign
     // render, but a caller that reaches renderPass() during one anyway must not sample
     // the foreign framebuffer into this decoration's persistent background cache.
     // The genie's redirected pass is the one foreign render glass belongs in:
     // it only ever draws there from its cached backdrop (wantsBackgroundResample).
-    if (RenderGuards::isForeignRender() && !Genie::isAnimating(m_window.lock()))
+    if (RenderGuards::isForeignRender(ctx) && !Genie::isAnimating(m_window.lock()))
         return;
 
     auto& shaderManager = g_pGlobalState->shaderManager;
@@ -506,7 +519,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
     if (!window)
         return;
 
-    const auto source = g_pHyprRenderer->m_renderData.currentFB;
+    const auto source = ctx.m_data.currentFB;
     if (!source)
         return;
 
@@ -524,8 +537,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
     if (monitor)
         Diagnostics::recordWindowGlassDraw(monitor->m_id);
 
-    CBox windowBox    = *optBox;
-    CBox transformBox = WindowGeometry::applyMonitorTransform(windowBox, monitor);
+    const CBox windowBox = *optBox;
 
     // Every non-discarded frame needs this regardless of cache hit/miss: a
     // cache-hit frame has no sampleBackground()/blurBackground() call for it
@@ -534,21 +546,21 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
     // mis-render the composite even though the cached sample itself is fine.
     const bool isDark          = resolveThemeIsDark();
     const std::string preset   = resolvePresetName();
-    const SResolveContext ctx  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets};
+    const SResolveContext resolveContext  = {preset, isDark, g_pGlobalState->config, g_pGlobalState->customPresets};
 
     float monitorScale = monitor->m_scale;
 
     // Hyprland renders internal-fullscreen windows unrounded (dontRound), we need to
     // match, or the glass would show rounded gaps at the screen corners
     const bool fsUnrounded = Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_FULLSCREEN;
-    float cornerRadius  = fsUnrounded ? 0.0f : window->rounding() * monitorScale;
-    float roundingPower = window->roundingPower();
+    float cornerRadius  = fsUnrounded ? 0.0f : window->presentation().rounding() * monitorScale;
+    float roundingPower = window->presentation().roundingPower();
 
     // Resolved here, not inside the cache branch below, so it stays fresh on a
     // cache-hit frame too, when neither sampleBackground() nor blendOwnContent() run.
-    m_lastSelfSample = selfSampleFor(ctx);
+    m_lastSelfSample = selfSampleFor(resolveContext);
     if (m_lastSelfSample > 0.0f && !g_pGlobalState->selfSampleConfigured) {
-        // hyprctl keyword emits no config.reloaded, and a setup without layer
+        // hyprctl eval emits no config.reloaded, and a setup without layer
         // surfaces has no other place that would notice self_sample turning on
         g_pGlobalState->selfSampleConfigured = true;
         BackgroundDamageObserver::refreshEnabled();
@@ -559,12 +571,12 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
     // not the active/inactive dimming or opacity rules: those make the surface
     // more translucent — revealing more glass — and shouldn't wash out the
     // glass pane itself. Rebuild the fade-only alpha from its components.
-    float glassAlpha = window->alphaTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE);
-    if (const auto workspace = window->m_workspace; workspace && !window->m_pinned)
+    float glassAlpha = window->presentation().alpha().getTotalWithout(Desktop::View::WINDOW_ALPHA_ACTIVE);
+    if (const auto workspace = window->m_workspace; workspace && !(window->m_state & Desktop::View::WINDOW_STATE_PINNED))
         glassAlpha *= workspace->m_alpha->value();
 
     // A fullscreen window shows no edge, like Hyprland draws it no border.
-    m_lastFocusLightStrength = fsUnrounded ? 0.0f : focusLightFor(ctx);
+    m_lastFocusLightStrength = fsUnrounded ? 0.0f : focusLightFor(resolveContext);
     float focusLight         = 0.0f;
     if (m_lastFocusLightStrength > 0.0f) {
         const auto now = std::chrono::steady_clock::now();
@@ -585,38 +597,38 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
 
     const MONITORID monitorId = monitor ? monitor->m_id : -1; // -1 mirrors Hyprland's own MONITOR_INVALID
 
-    if (!wantsBackgroundResample(monitor, transformBox, xray)) {
+    if (!wantsBackgroundResample(ctx, monitor, windowBox, xray)) {
         // Background unchanged since the last real sample — reuse it, skip
         // the most expensive GPU work (blit + blur passes) entirely.
         Diagnostics::recordWindowCacheHit(monitorId);
     } else {
         // X-ray never samples the live frame: it holds the windows it hides.
-        const auto snapshot = xray ? xraySnapshotCovering(monitor, source, transformBox) : nullptr;
+        const auto snapshot = xray ? xraySnapshotCovering(monitor, source, windowBox) : nullptr;
         const bool covered  = xray ? static_cast<bool>(snapshot) :
-                                     GlassRenderer::sampleRegionCovered(transformBox, source, g_pHyprRenderer->m_renderData.damage, monitor);
+                                     GlassRenderer::sampleRegionCovered(windowBox, source, ctx.m_data.damage);
 
         if (covered) {
-            float blurStrength   = resolvePresetFloat(ctx, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength) * tintedBlurScale();
+            float blurStrength   = resolvePresetFloat(resolveContext, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength) * tintedBlurScale();
             int downscale        = blurStrength >= GlassRenderer::BLUR_DOWNSCALE_THRESHOLD ? GlassRenderer::BLUR_DOWNSCALE_MAX : 1;
 
-            GlassRenderer::sampleBackground(m_sampleFramebuffer, xray ? snapshot : source, transformBox, m_samplePaddingRatio, downscale);
+            GlassRenderer::sampleBackground(ctx, m_sampleFramebuffer, xray ? snapshot : source, windowBox, m_samplePaddingRatio, downscale);
 
             // Only here, on a real (non-cached) sample: blending onto a cache-hit
             // frame would double-composite our own content over an already-blurred FBO.
             if (m_lastSelfSample > 0.0f)
-                GlassRenderer::blendOwnContent(m_sampleFramebuffer, window, monitor, transformBox, downscale,
-                                               m_lastSelfSample, cornerRadius, roundingPower);
+                GlassRenderer::blendOwnContent(ctx, m_sampleFramebuffer, window, monitor, windowBox,
+                                               downscale, m_lastSelfSample, cornerRadius, roundingPower);
 
             float blurRadius     = blurStrength * 12.0f / downscale;
-            int blurIterations   = std::clamp(static_cast<int>(resolvePresetInt(ctx, &SPresetValues::blurIterations, &SOverridableConfig::blurIterations)), 1, 5);
+            int blurIterations   = std::clamp(static_cast<int>(resolvePresetInt(resolveContext, &SPresetValues::blurIterations, &SOverridableConfig::blurIterations)), 1, 5);
 
-            if (ctx.config.blurFold && **ctx.config.blurFold) {
+            if (resolveContext.config.blurFold && **resolveContext.config.blurFold) {
                 const GlassRenderer::SFoldedBlur folded = GlassRenderer::foldBlurPasses(blurRadius, blurIterations);
                 blurRadius     = folded.radius;
                 blurIterations = folded.iterations;
             }
 
-            GlassRenderer::blurBackground(m_sampleFramebuffer, blurRadius, blurIterations, source);
+            GlassRenderer::blurBackground(ctx, m_sampleFramebuffer, blurRadius, blurIterations, source);
 
             m_frost.sampleChanged();
 
@@ -652,7 +664,7 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
     // Frost: blurred further where windows lie behind, clear over the wallpaper. X-ray
     // shows no window behind the glass, and a fullscreen window has nothing behind it.
     GlassRenderer::SFrostInput frostInput;
-    const float                frostSetting = (xray || fsUnrounded) ? 0.0f : frostFor(ctx);
+    const float                frostSetting = (xray || fsUnrounded) ? 0.0f : frostFor(resolveContext);
     if (frostSetting > 0.0f || m_frost.active()) {
         const float target =
             frostSetting > 0.0f ? frostSetting * Frost::amountForCoverage(Frost::coveredFraction(window, monitor, windowBox)) : 0.0f;
@@ -668,21 +680,21 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
             damageFrost();
 
         if (m_frost.amount() > Frost::MINIMUM_AMOUNT) {
-            const float blurStrength = resolvePresetFloat(ctx, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength);
+            const float blurStrength = resolvePresetFloat(resolveContext, &SPresetValues::blurStrength, &SOverridableConfig::blurStrength);
             const int   downscale    = blurStrength >= GlassRenderer::BLUR_DOWNSCALE_THRESHOLD ? GlassRenderer::BLUR_DOWNSCALE_MAX : 1;
             // the copy is half the sample's size on top of the sample's own downscale
-            const float radius = frostBlurFor(ctx) * 12.0f / (2.0f * downscale);
+            const float radius = frostBlurFor(resolveContext) * 12.0f / (2.0f * downscale);
 
             if (m_frost.needsBuild(m_sampleFramebuffer, radius)) {
                 float frostRadius     = radius;
                 int   frostIterations = Frost::BLUR_ITERATIONS;
-                if (ctx.config.blurFold && **ctx.config.blurFold) {
+                if (resolveContext.config.blurFold && **resolveContext.config.blurFold) {
                     const GlassRenderer::SFoldedBlur folded = GlassRenderer::foldBlurPasses(frostRadius, frostIterations);
                     frostRadius     = folded.radius;
                     frostIterations = folded.iterations;
                 }
 
-                if (GlassRenderer::buildFrostCopy(m_sampleFramebuffer, m_frost.copy(), m_frost.temporary(), frostRadius, frostIterations, source)) {
+                if (GlassRenderer::buildFrostCopy(ctx, m_sampleFramebuffer, m_frost.copy(), m_frost.temporary(), frostRadius, frostIterations, source)) {
                     m_frost.built(radius);
                     Diagnostics::recordFrostRebuild(monitorId);
                 }
@@ -695,10 +707,10 @@ void CGlassDecoration::renderPass(PHLMONITOR monitor, const float& alpha, bool x
         }
     }
 
-    GlassRenderer::applyGlassEffect(m_sampleFramebuffer, source,
-                                     windowBox, transformBox, glassAlpha,
+    GlassRenderer::applyGlassEffect(ctx, m_sampleFramebuffer, source,
+                                     windowBox, glassAlpha,
                                      std::array<float, 4>{cornerRadius, cornerRadius, cornerRadius, cornerRadius},
-                                     roundingPower, m_samplePaddingRatio, ctx, nullptr, focusLight,
+                                     roundingPower, m_samplePaddingRatio, resolveContext, nullptr, focusLight,
                                      frostInput.copy ? &frostInput : nullptr);
 }
 
@@ -711,10 +723,10 @@ eDecorationType CGlassDecoration::getDecorationType() {
 // PHLWINDOW argument is ignored on purpose: a third-party replay passes its own
 // handle, while our state is keyed on the owner we were constructed with.
 void CGlassDecoration::updateWindow(PHLWINDOW) {
-    // A plugin may replay this mid-render under substituted geometry. mainFB is
-    // set exactly between begin() and end(); currentFB also follows binds taken
-    // outside a pass. Above the m_last* store, so the next real update bumps.
-    if (g_pHyprRenderer->m_renderData.mainFB)
+    // A plugin may replay this mid-render under substituted geometry. The render
+    // context is active exactly between begin() and finishRender(). Above the
+    // m_last* store, so the next real update bumps.
+    if (g_pHyprRenderer->context().active())
         return;
 
     damageEntire();
@@ -742,8 +754,8 @@ void CGlassDecoration::updateWindow(PHLWINDOW) {
     // layer; switching to it bumps on its own. Same predicate Hyprland renders
     // by: a slide or fade keeps drawing an already-invisible workspace.
     const auto workspace = ownWindow->m_workspace;
-    if (workspace && !workspace->m_visible && !workspace->m_forceRendering && !workspace->m_renderOffset->isBeingAnimated() &&
-        !workspace->m_alpha->isBeingAnimated() && !ownWindow->m_pinned)
+    if (workspace && !workspace->visible() && !workspace->m_forceRendering && !workspace->m_renderOffset->isBeingAnimated() &&
+        !workspace->m_alpha->isBeingAnimated() && !(ownWindow->m_state & Desktop::View::WINDOW_STATE_PINNED))
         return;
 
     g_pGlobalState->bumpSceneGeneration(monitor);

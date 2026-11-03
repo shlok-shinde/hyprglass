@@ -20,8 +20,9 @@
 #include <GLES3/gl32.h>
 #include <GLES2/gl2ext.h>
 
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/helpers/MiscFunctions.hpp>
+#include <hyprland/src/ipc/s1/S1.hpp>
 #include <hyprland/src/render/Renderer.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
 
@@ -45,7 +46,7 @@ struct SStageQueryRing {
     // The monitor being rendered when each pending slot's query was opened
     // (captured in CScopedStageTimer's constructor). A query's result is only
     // ever readable well after glEndQuery, on a later call to drainStage(), by
-    // which point g_pHyprRenderer->m_renderData.pMonitor may have moved on to
+    // which point the render context's m_data.pMonitor may have moved on to
     // another monitor entirely — the result must carry its own monitor id
     // rather than being attributed to whatever is current at drain time.
     std::array<MONITORID, QUERY_RING_SIZE> monitor{};
@@ -176,10 +177,10 @@ std::string windowField(const PHLWINDOWREF& windowRef) {
     const auto window = windowRef.lock();
     if (!window)
         return "-";
-    return std::format("0x{:x} ({})", reinterpret_cast<uintptr_t>(window.get()), window->m_class.empty() ? "-" : window->m_class);
+    return std::format("0x{:x} ({})", reinterpret_cast<uintptr_t>(window.get()), window->metadata().appID().empty() ? "-" : window->metadata().appID());
 }
 
-std::string formatItems(eHyprCtlOutputFormat format) {
+std::string formatItems(IPC::Socket1::eOutputFormat format) {
     struct SLiveItem {
         WP<CWLSurfaceResource>                surface;
         std::shared_ptr<CGlassSubsurfaceState> state;
@@ -197,7 +198,7 @@ std::string formatItems(eHyprCtlOutputFormat format) {
     const bool subsurfacesEnabled = g_pGlobalState && g_pGlobalState->config.subsurfacesEnabled && **g_pGlobalState->config.subsurfacesEnabled;
     const bool protocolActive     = ItemHints::active();
 
-    if (format == eHyprCtlOutputFormat::FORMAT_JSON) {
+    if (format == IPC::Socket1::eOutputFormat::FORMAT_JSON) {
         std::string json = std::format("{{\n  \"subsurfacesEnabled\": {}, \"protocolActive\": {}, \"items\": [\n",
                                         subsurfacesEnabled ? "true" : "false", protocolActive ? "true" : "false");
 
@@ -229,7 +230,7 @@ std::string formatItems(eHyprCtlOutputFormat format) {
 
             json += std::format("    {{\"window\": \"{}\", \"windowClass\": \"{}\", \"shapeMode\": \"{}\", \"hintPreset\": \"{}\", "
                                 "\"hintPresetRejected\": {}, \"resolvedPreset\": \"{}\", \"hintShape\": {}, \"lastDrawn\": {}}}",
-                                window ? std::format("0x{:x}", reinterpret_cast<uintptr_t>(window.get())) : "", escapeJSONStrings(window ? window->m_class : ""),
+                                window ? std::format("0x{:x}", reinterpret_cast<uintptr_t>(window.get())) : "", escapeJSONStrings(window ? window->metadata().appID() : ""),
                                 shapeModeLabel(hints ? hints->shapeMode : eItemShapeMode::NONE), escapeJSONStrings(hintPreset),
                                 drawn && state.lastPresetHint().rejected ? "true" : "false", escapeJSONStrings(drawn ? state.lastResolvedPreset() : ""), hintShape,
                                 lastDrawn);
@@ -240,11 +241,11 @@ std::string formatItems(eHyprCtlOutputFormat format) {
     }
 
     if (live.empty())
-        return std::format("hyprglass items: no active subsurface glass items (subsurfaces:enabled={}, hyprglass_item_v1 protocol={})\n",
+        return std::format("hyprglass items: no active subsurface glass items (subsurfaces.enabled={}, hyprglass_item_v1 protocol={})\n",
                             subsurfacesEnabled ? "on" : "off", protocolActive ? "active" : "inactive");
 
     std::string out = "hyprglass items\n";
-    out += std::format("  subsurfaces:enabled: {}   hyprglass_item_v1 protocol: {}\n\n", subsurfacesEnabled ? "on" : "off",
+    out += std::format("  subsurfaces.enabled: {}   hyprglass_item_v1 protocol: {}\n\n", subsurfacesEnabled ? "on" : "off",
                         protocolActive ? "active" : "inactive");
     out += std::format("  {:<30} {:<10} {:<9} {}\n", "window", "monitor", "shape", "preset (requested -> resolved)");
 
@@ -277,13 +278,13 @@ std::string formatItems(eHyprCtlOutputFormat format) {
     return out;
 }
 
-std::string formatStats(eHyprCtlOutputFormat format) {
+std::string formatStats(IPC::Socket1::eOutputFormat format) {
     drainAllStages();
 
     const bool timersOn    = timersEnabledByConfig();
     const bool timersReady = timerExtensionAvailable();
 
-    if (format == eHyprCtlOutputFormat::FORMAT_JSON) {
+    if (format == IPC::Socket1::eOutputFormat::FORMAT_JSON) {
         std::string json = "{\n  \"monitors\": [\n";
         bool        first = true;
         for (const auto& [id, counters] : s_counters) {
@@ -325,7 +326,7 @@ std::string formatStats(eHyprCtlOutputFormat format) {
     std::string out = "hyprglass stats\n";
 
     if (!timersOn)
-        out += "  stage timers: off (plugin:hyprglass:debug:timers = 0)\n";
+        out += "  stage timers: off (hg.config({ debug = { timers = true } }))\n";
     else if (!timersReady)
         out += "  stage timers: unavailable (GL_EXT_disjoint_timer_query not supported by this driver)\n";
 
@@ -382,7 +383,7 @@ struct SFeatureStatus {
     [[nodiscard]] bool active() const noexcept { return reason.empty(); }
 };
 
-std::string formatStatus(eHyprCtlOutputFormat format) {
+std::string formatStatus(IPC::Socket1::eOutputFormat format) {
     // Registered after g_pGlobalState is created and unregistered before it is reset.
     const auto& config = g_pGlobalState->config;
 
@@ -391,7 +392,7 @@ std::string formatStatus(eHyprCtlOutputFormat format) {
     const bool        protocolActive = ItemHints::active();
 
     // Same order as the render path: the setting, then the hook, then the shaders.
-    auto featureStatus = [&](Hyprlang::INT* const* enabledValue, bool hooked) {
+    auto featureStatus = [&](Config::BOOL* const* enabledValue, bool hooked) {
         SFeatureStatus status;
         status.enabled = enabledValue && **enabledValue;
         if (!status.enabled)
@@ -420,7 +421,7 @@ std::string formatStatus(eHyprCtlOutputFormat format) {
 
     const bool active = windows.active() || layers.active() || subsurfaces.active();
 
-    if (format == eHyprCtlOutputFormat::FORMAT_JSON) {
+    if (format == IPC::Socket1::eOutputFormat::FORMAT_JSON) {
         auto featureJson = [](const SFeatureStatus& status) {
             return std::format("{{\"enabled\": {}, \"active\": {}, \"reason\": {}}}", status.enabled ? "true" : "false", status.active() ? "true" : "false",
                                status.active() ? std::string("null") : std::format("\"{}\"", status.reason));
@@ -449,7 +450,7 @@ std::string formatStatus(eHyprCtlOutputFormat format) {
     return out;
 }
 
-SP<SHyprCtlCommand> s_command;
+SP<IPC::Socket1::SCommand> s_command;
 
 } // namespace
 
@@ -560,10 +561,12 @@ void resetCounters() {
 }
 
 void registerHyprCtlCommand(HANDLE handle) {
-    s_command = HyprlandAPI::registerHyprCtlCommand(handle, SHyprCtlCommand{
-        .name  = "hyprglass",
-        .exact = false,
-        .fn    = [](eHyprCtlOutputFormat format, std::string request) -> std::string {
+    s_command = HyprlandAPI::registerHyprCtlCommand(handle, IPC::Socket1::SCommand{
+        .name    = "hyprglass",
+        .match   = IPC::Socket1::COMMAND_MATCH_PREFIX,
+        .handler = [](const IPC::Socket1::SRequest& hyprCtlRequest) -> IPC::Socket1::SResponse {
+            const auto format = hyprCtlRequest.format;
+            const auto& request = hyprCtlRequest.command;
             std::string_view rest{request};
             constexpr std::string_view PREFIX = "hyprglass";
             if (rest.starts_with(PREFIX))
@@ -576,7 +579,7 @@ void registerHyprCtlCommand(HANDLE handle) {
 
             if (rest == "stats reset") {
                 resetCounters();
-                return format == eHyprCtlOutputFormat::FORMAT_JSON ? "{\"ok\": true}\n" : "hyprglass: counters reset\n";
+                return format == IPC::Socket1::eOutputFormat::FORMAT_JSON ? "{\"ok\": true}\n" : "hyprglass: counters reset\n";
             }
 
             if (rest == "items")
@@ -585,10 +588,10 @@ void registerHyprCtlCommand(HANDLE handle) {
             if (rest == "status")
                 return formatStatus(format);
 
-            if (auto genie = Genie::handleHyprctl(rest, format == eHyprCtlOutputFormat::FORMAT_JSON))
+            if (auto genie = Genie::handleHyprctl(rest, format == IPC::Socket1::eOutputFormat::FORMAT_JSON))
                 return *genie;
 
-            if (auto touch = TouchLight::handleHyprctl(rest, format == eHyprCtlOutputFormat::FORMAT_JSON))
+            if (auto touch = TouchLight::handleHyprctl(rest, format == IPC::Socket1::eOutputFormat::FORMAT_JSON))
                 return *touch;
 
             return "hyprglass: usage: hyprctl hyprglass <status|stats [reset]|items|minimize|restore|minimized|touch>"
@@ -625,7 +628,7 @@ void shutdown() {
     }
 }
 
-CScopedStageTimer::CScopedStageTimer(EStage stage) : m_stage(stage) {
+CScopedStageTimer::CScopedStageTimer(Render::CRenderContext& ctx, EStage stage) : m_stage(stage) {
     if (!timersEnabledByConfig() || !timerExtensionAvailable() || s_queryActive)
         return;
 
@@ -652,7 +655,7 @@ CScopedStageTimer::CScopedStageTimer(EStage stage) : m_stage(stage) {
     // bracket always wraps GL work for whichever monitor is currently being
     // rendered.
     MONITORID monitorId = -1; // -1 mirrors Hyprland's own MONITOR_INVALID
-    if (const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock())
+    if (const auto monitor = ctx.m_data.pMonitor.lock())
         monitorId = monitor->m_id;
     ring.monitor[slot] = monitorId;
 

@@ -6,7 +6,7 @@
 
 #include <chrono>
 #include <optional>
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
 #include <hyprland/src/render/decorations/IHyprWindowDecoration.hpp>
 #include <hyprland/src/render/Framebuffer.hpp>
 #include <hyprland/src/SharedDefs.hpp>
@@ -18,7 +18,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
 
     [[nodiscard]] SDecorationPositioningInfo getPositioningInfo() override;
     void                                     onPositioningReply(const SDecorationPositioningReply& reply) override;
-    void                                     draw(PHLMONITOR monitor, float const& alpha) override;
+    void                                     draw(Render::CRenderContext& ctx, PHLMONITOR monitor, float const& alpha, const Render::SWindowRenderPresentation&) override;
     [[nodiscard]] eDecorationType            getDecorationType() override;
     void                                     updateWindow(PHLWINDOW window) override;
     void                                     damageEntire() override;
@@ -27,7 +27,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     [[nodiscard]] std::string                getDisplayName() override;
 
     [[nodiscard]] PHLWINDOW getOwner();
-    void                    renderPass(PHLMONITOR monitor, const float& alpha, bool xray, bool sampleOnly = false);
+    void                    renderPass(Render::CRenderContext& ctx, PHLMONITOR monitor, const float& alpha, bool xray, bool sampleOnly = false);
     void                    onFullscreenStateChanged();
 
     // Content below committed damage in our sample region — resample next frame.
@@ -35,6 +35,11 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // decoration whose padded box overlaps a commit from outside the
     // window's own surface tree.
     void markBackgroundDirty();
+
+    // Folds this window into the monitor's render-order fingerprint. Public because
+    // Hyprland draws some windows without decorations (X11 menus, tooltips), so
+    // draw() never runs for them and main.cpp folds them from the window stage.
+    void foldRenderFingerprint(Render::CRenderContext& ctx, const PHLMONITOR& monitor, float alpha);
 
     // Applies a mark markBackgroundDirty() owed under the rate limit once its
     // deadline passed, or re-arms the shared timer for it.
@@ -47,8 +52,8 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // Pure predicate: true when the cached sample must not be reused as-is
     // this frame. Called identically from CGlassPassElement::needsLiveBlur()
     // (draw()-time) and from renderPass() itself — safe to call twice, no GL
-    // calls. transformBox is monitor-local physical pixels (see callers).
-    [[nodiscard]] bool wantsBackgroundResample(PHLMONITOR monitor, const CBox& transformBox, bool xray) const;
+    // calls. windowBox is monitor-local physical pixels (see callers).
+    [[nodiscard]] bool wantsBackgroundResample(Render::CRenderContext& ctx, PHLMONITOR monitor, const CBox& windowBox, bool xray) const;
 
     // Owner test without the shared_ptr copy getOwner() hands out.
     [[nodiscard]] bool  ownsWindow(const PHLWINDOW& window) const { return m_window == window; }
@@ -103,7 +108,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // glass is invisible on static windows (#46).
     bool m_noBlurApplied = false;
 
-    // Glass can start without a config reload (tags, hyprctl keyword), and
+    // Glass can start without a config reload (tags, hyprctl eval), and
     // each start rechecks that Hyprland shadows are on.
     bool m_glassWasEnabled = false;
 
@@ -146,7 +151,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // many duplicate copies happened to render, not on the scene.
     uint64_t m_lastFoldedFrameSerial = 0;
 
-    void               queueGlassPass(float alpha, bool xray);
+    void               queueGlassPass(Render::CRenderContext& ctx, float alpha, bool xray);
     [[nodiscard]] bool isCurrentGlassPass(uint64_t serial, uint32_t index) const {
         return serial == 0 || (serial == m_glassFrameSerial && index == m_glassQueueIndex);
     }
@@ -161,7 +166,7 @@ class CGlassDecoration : public IHyprWindowDecoration {
     // precedence, and re-deriving would mis-attribute those to opaque-skip.
     enum class EEnabledResolution {
         Enabled,
-        Disabled,              // hyprglass_disabled tag, or plugin:hyprglass:enabled = 0
+        Disabled,              // hyprglass_disabled tag, or enabled = false
         DisabledBecauseOpaque, // skip_opaque_windows and the window is opaque
     };
 

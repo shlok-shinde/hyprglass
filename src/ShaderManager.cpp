@@ -212,7 +212,8 @@ bool CShaderManager::compileGenieShader() {
 
     const auto program = genieShader->program();
 
-    genieUniforms.fbSize   = glGetUniformLocation(program, "fbSize");
+    genieUniforms.outBox   = glGetUniformLocation(program, "outBox");
+    genieUniforms.inBox    = glGetUniformLocation(program, "inBox");
     genieUniforms.srcBox   = glGetUniformLocation(program, "srcBox");
     genieUniforms.target   = glGetUniformLocation(program, "target");
     genieUniforms.progress = glGetUniformLocation(program, "progress");

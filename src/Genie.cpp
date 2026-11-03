@@ -12,8 +12,10 @@
 #include <hyprland/src/Compositor.hpp>
 #include <hyprland/src/desktop/state/FocusState.hpp>
 #include <hyprland/src/desktop/state/WindowState.hpp>
-#include <hyprland/src/desktop/view/Window.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowEffectsController.hpp>
+#include <hyprland/src/render/transformer/TransformerList.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopTimer.hpp>
@@ -70,6 +72,16 @@ namespace {
         CGenieTransformer(PHLWINDOWREF window, bool minimizing, const CBox& targetGlobal, float durationMs)
             : m_window(window), m_minimizing(minimizing), m_targetGlobal(targetGlobal), m_durationMs(std::max(durationMs, 1.0f)), m_start(Clock::now()) {}
 
+        // Another run on a window whose finished transformer Hyprland hasn't
+        // dropped yet (it removes inactive ones on its own ticks) reuses it.
+        void restart(bool minimizing, const CBox& targetGlobal, float durationMs) {
+            m_minimizing   = minimizing;
+            m_targetGlobal = targetGlobal;
+            m_durationMs   = std::max(durationMs, 1.0f);
+            m_start        = Clock::now();
+            m_detached     = false;
+        }
+
         // 0 = window at rest, 1 = entirely inside the target
         [[nodiscard]] float progress() const {
             if (s_progressOverride)
@@ -83,26 +95,36 @@ namespace {
             return std::chrono::duration<float, std::milli>(Clock::now() - m_start).count() >= m_durationMs;
         }
 
-        SP<Render::IFramebuffer> transform(SP<Render::IFramebuffer> in) override {
+        // Hyprland hands over the window's buffer and the monitor pixels it covers,
+        // and wants back a buffer covering (at least) context.outputBox: everything
+        // between the window and its target, see transformedExtents().
+        Render::SWindowTransformBuffer transform(Render::CRenderContext& ctx, const Render::SWindowTransformBuffer& in,
+                                                 const Render::SWindowTransformContext& context) override {
             auto& shaderManager = g_pGlobalState->shaderManager;
             shaderManager.initializeIfNeeded();
 
-            const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+            const auto monitor = context.monitor.lock();
             s_stats.transforms++;
-            if (!in || !monitor || !shaderManager.isInitialized())
+            if (!in.framebuffer || !in.framebuffer->getTexture() || !monitor || !shaderManager.isInitialized())
                 return in;
 
-            // resources() is a weak ref to a unique pointer: dereference it, never lock() it
-            const auto out = monitor->resources() ? monitor->resources()->getUnusedWorkBuffer() : nullptr;
-            if (!out || out == in) {
-                s_stats.noOutput++;
+            m_lastBox = context.currentBox;
+
+            const float scale  = monitor->m_scale;
+            const CBox  canvas = Render::pixelBoxForLogical(context.outputBox.copy().expand(1.0 / scale), scale);
+            if (canvas.empty())
                 return in;
+
+            const auto out = g_pHyprRenderer->getWorkBuffer(ctx, canvas.size());
+            if (!out || out == in.framebuffer) {
+                s_stats.noOutput++;
+                return {.framebuffer = in.framebuffer, .box = in.box, .success = false};
             }
 
-            const float    scale = monitor->m_scale;
-            const Vector2D size  = in->m_size;
-            const CBox     box   = m_lastBox.copy().scale(scale);
-            CBox           target = m_targetGlobal.copy().translate(-monitor->m_position).scale(scale);
+            // all in monitor-local pixels
+            const CBox     box     = context.currentBox.copy().scale(scale);
+            const CBox     target  = m_targetGlobal.copy().translate(-monitor->m_position).scale(scale);
+            const Vector2D texSize = in.framebuffer->getTexture()->m_size;
 
             const float p = progress();
             s_stats.lastProgress = p;
@@ -113,6 +135,9 @@ namespace {
                -1.0f,-1.0f, 1.0f,
             };
 
+            Render::GL::CFramebufferBindingGuard bindings{g_pHyprRenderer->glBackend()};
+            auto                                 state = ctx.saveDrawState();
+
             g_pHyprRenderer->blend(false);
             g_pHyprOpenGL->setCapStatus(GL_SCISSOR_TEST, false);
             if (glIsEnabled(GL_SCISSOR_TEST))
@@ -121,49 +146,42 @@ namespace {
                 glDisable(GL_STENCIL_TEST);
 
             glBindFramebuffer(GL_FRAMEBUFFER, fbId(out));
-            g_pHyprOpenGL->setViewport(0, 0, static_cast<int>(out->m_size.x), static_cast<int>(out->m_size.y));
+            g_pHyprOpenGL->setViewport(0, 0, static_cast<int>(canvas.w), static_cast<int>(canvas.h));
 
             const auto& uniforms = shaderManager.genieUniforms;
             auto        shader   = g_pHyprOpenGL->useShader(shaderManager.genieShader);
             shader->setUniformMatrix3fv(SHADER_PROJ, 1, GL_FALSE, FULLSCREEN_PROJECTION);
             shader->setUniformInt(SHADER_TEX, 0);
-            glUniform2f(uniforms.fbSize, static_cast<float>(size.x), static_cast<float>(size.y));
+            glUniform4f(uniforms.outBox, static_cast<float>(canvas.x), static_cast<float>(canvas.y), static_cast<float>(canvas.w), static_cast<float>(canvas.h));
+            glUniform4f(uniforms.inBox, static_cast<float>(in.box.x), static_cast<float>(in.box.y), static_cast<float>(texSize.x), static_cast<float>(texSize.y));
             glUniform4f(uniforms.srcBox, static_cast<float>(box.x), static_cast<float>(box.y), static_cast<float>(box.w), static_cast<float>(box.h));
             glUniform3f(uniforms.target, static_cast<float>(target.x), static_cast<float>(target.x + target.w), static_cast<float>(target.y + target.h * 0.5));
             glUniform1f(uniforms.progress, p);
 
-            glActiveTexture(GL_TEXTURE0);
-            in->getTexture()->bind();
+            g_pHyprOpenGL->setActiveTexture(GL_TEXTURE0);
+            in.framebuffer->getTexture()->bind();
             glBindVertexArray(shader->getUniformLocation(SHADER_SHADER_VAO));
             glDrawArrays(GL_TRIANGLE_STRIP, 0, 4);
             glBindVertexArray(0);
-
-            // back to what Hyprland had bound when it called us
             g_pHyprRenderer->blend(true);
-            glBindFramebuffer(GL_FRAMEBUFFER, fbId(in));
-            g_pHyprOpenGL->setViewport(0, 0, static_cast<int>(in->m_size.x), static_cast<int>(in->m_size.y));
 
-            return out;
+            return {.framebuffer = out, .box = canvas};
         }
 
-        // Hyprland draws our result only inside the box this reports. Borrow the
-        // motion-blur extents (one sample, no motion) to widen it to everything
-        // between the window and its target.
-        void amendTransformedRenderData(const CBox& currentBox, SMotionBlurData* data) override {
-            m_lastBox = currentBox;
-            s_stats.amends++;
-            if (!data)
-                return;
-
-            const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+        // Hyprland draws (and damages) the result only inside the box this reports:
+        // everything between the window and its target.
+        CBox transformedExtents(const CBox& currentBox) const override {
+            const auto window  = m_window.lock();
+            const auto monitor = window ? window->m_monitor.lock() : nullptr;
             if (!monitor)
-                return;
+                return currentBox;
+            m_lastBox = currentBox;
+            return coveredGlobal(monitor).translate(-monitor->m_position);
+        }
 
-            const CBox covered = coveredGlobal(monitor).translate(-monitor->m_position);
-            data->enabled  = true;
-            data->previous = covered;
-            data->current  = covered;
-            data->samples  = 1;
+        // Done: Hyprland drops a transformer that reports itself inactive (removeInactive)
+        bool active() const override {
+            return !m_detached;
         }
 
         [[nodiscard]] CBox coveredGlobal(const PHLMONITOR& monitor) const {
@@ -180,12 +198,13 @@ namespace {
         CBox         m_targetGlobal; // global logical coordinates
         float        m_durationMs;
         Clock::time_point m_start;
-        CBox         m_lastBox;      // monitor-local logical box Hyprland last gave us
+        mutable CBox m_lastBox;      // monitor-local logical box Hyprland last gave us
+        bool         m_detached = false;
     };
 
     struct SAnimation {
         PHLWINDOWREF        window;
-        CGenieTransformer*  transformer = nullptr; // owned by window->m_transformers
+        CGenieTransformer*  transformer = nullptr; // owned by the window's transformer list
         bool                minimizing  = true;
         SP<CEventLoopTimer> timer;
         bool                holding = false;       // animation done, window parked, waiting out the fade
@@ -248,7 +267,7 @@ namespace {
     void detach(const PHLWINDOW& window, CGenieTransformer* transformer) {
         if (!window)
             return;
-        std::erase_if(window->m_transformers, [&](const auto& t) { return t.get() == transformer; });
+        transformer->m_detached = true; // inactive: Hyprland skips it from now on
         g_pHyprRenderer->damageWindow(window);
     }
 
@@ -296,12 +315,15 @@ namespace {
     }
 
     CGenieTransformer* attach(const PHLWINDOW& window, bool minimizing, const CBox& target, float durationMs) {
-        auto  transformer = makeUnique<CGenieTransformer>(PHLWINDOWREF{window}, minimizing, target, durationMs);
-        auto* raw         = transformer.get();
+        auto& transformers = window->effects().transformers();
+        auto* raw          = transformers->get<CGenieTransformer>();
+        if (raw)
+            raw->restart(minimizing, target, durationMs);
+        else
+            raw = transformers->emplace<CGenieTransformer>(PHLWINDOWREF{window}, minimizing, target, durationMs);
         // seed the box so the very first frame's damage covers the whole path
         if (const auto monitor = window->m_monitor.lock())
             raw->m_lastBox = window->getFullWindowBoundingBox().translate(-monitor->m_position);
-        window->m_transformers.emplace_back(std::move(transformer));
 
         SAnimation animation;
         animation.window      = window;
@@ -325,7 +347,7 @@ namespace {
     std::string minimize(PHLWINDOW window, std::optional<CBox> target, float durationMs) {
         if (!window)
             window = Desktop::focusState()->window();
-        if (!window || !window->m_isMapped)
+        if (!window || !window->mapped())
             return "no window";
         if (animationFor(window) || isMinimized(window))
             return "busy";
@@ -365,10 +387,14 @@ namespace {
         if (!workspace)
             return "no workspace";
 
+        const auto number = workspace->numberedID();
+        const auto name   = number ? std::to_string(*number) : workspace->addressableName();
+        const auto luaName = number ? name : std::format("\"{}\"", name);
+
         // Attach first, so the window is already inside the lamp when it lands on the workspace.
         attach(window, false, origin, durationMs > 0 ? durationMs : RESTORE_MS);
-        dispatch(std::format("hl.dsp.window.move({{ workspace = {}, follow = false, window = \"address:{}\" }})", workspace->m_id, addressOf(window)),
-                 std::format("movetoworkspacesilent {},address:{}", workspace->m_id, addressOf(window)));
+        dispatch(std::format("hl.dsp.window.move({{ workspace = {}, follow = false, window = \"address:{}\" }})", luaName, addressOf(window)),
+                 std::format("movetoworkspacesilent {},address:{}", name, addressOf(window)));
         dispatch(std::format("hl.dsp.focus({{ window = \"address:{}\" }})", addressOf(window)), std::format("focuswindow address:{}", addressOf(window)));
         return "ok";
     }
@@ -408,11 +434,11 @@ namespace {
     void onWindowOpened(PHLWINDOW window) {
         const auto now = Clock::now();
         std::erase_if(s_launches, [&](const SLaunch& pending) { return pending.deadline < now; });
-        if (s_launches.empty() || !window || !window->m_isMapped)
+        if (s_launches.empty() || !window || !window->mapped())
             return;
 
-        const auto windowClass  = lowercase(window->m_class);
-        const auto initialClass = lowercase(window->m_initialClass);
+        const auto windowClass  = lowercase(window->metadata().appID());
+        const auto initialClass = lowercase(window->metadata().initialAppID());
         auto       it           = std::ranges::find_if(s_launches, [&](const SLaunch& pending) {
             return std::ranges::any_of(pending.classes, [&](const std::string& c) { return c == windowClass || c == initialClass; });
         });
@@ -423,14 +449,14 @@ namespace {
         s_launches.erase(it);
 
         // opened somewhere out of sight (a rule sent it to another workspace): nothing to watch
-        if (animationFor(window) || window->isHidden() || !window->m_workspace || !window->m_workspace->isVisible())
+        if (animationFor(window) || window->isHidden() || !window->m_workspace || !window->m_workspace->visible())
             return;
 
         // The lamp replaces the pop-in: the window is at its place and size, fully
         // there, from the first frame, and the warp does the rest.
         window->positionAnimation()->warp();
         window->sizeAnimation()->warp();
-        window->alpha(Desktop::View::WINDOW_ALPHA_FADE)->warp();
+        window->alpha()[Desktop::View::WINDOW_ALPHA_FADE]->warp();
         attach(window, false, origin, RESTORE_MS);
     }
 
@@ -532,8 +558,18 @@ void shutdown() {
     for (auto& animation : s_animations) {
         if (animation.timer)
             g_pEventLoopManager->removeTimer(animation.timer);
-        if (const auto window = animation.window.lock())
-            std::erase_if(window->m_transformers, [&](const auto& t) { return t.get() == animation.transformer; });
+        if (animation.window.lock() && animation.transformer)
+            animation.transformer->m_detached = true;
+    }
+    // None may outlive the plugin's code, finished ones included
+    for (const auto& window : Desktop::viewState()->windows()) {
+        if (!window)
+            continue;
+        if (auto* genie = window->effects().transformers()->get<CGenieTransformer>()) {
+            genie->m_detached = true;
+            window->effects().transformers()->removeInactive();
+            g_pHyprRenderer->damageWindow(window);
+        }
     }
     s_animations.clear();
     s_minimized.clear();
@@ -590,10 +626,10 @@ std::optional<std::string> handleHyprctl(std::string_view request, bool json) {
         for (const auto& entry : s_minimized) {
             const auto window = entry.window.lock();
             if (json) {
-                out += std::format("{}{{\"address\": \"{}\", \"class\": \"{}\"}}", first ? "" : ", ", addressOf(window), window->m_class);
+                out += std::format("{}{{\"address\": \"{}\", \"class\": \"{}\"}}", first ? "" : ", ", addressOf(window), window->metadata().appID());
                 first = false;
             } else
-                out += std::format("{} {}\n", addressOf(window), window->m_class);
+                out += std::format("{} {}\n", addressOf(window), window->metadata().appID());
         }
         return json ? out + "]\n" : (out.empty() ? "none\n" : out);
     }

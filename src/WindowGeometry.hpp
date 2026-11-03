@@ -1,24 +1,28 @@
 #pragma once
 
-#include <hyprland/src/desktop/view/Window.hpp>
+#include <hyprland/src/desktop/view/window/Window.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
 #include <hyprland/src/render/OpenGL.hpp>
 #include <hyprutils/math/Box.hpp>
 #include <optional>
 
 namespace WindowGeometry {
 
+// Monitor-local physical pixels in render space, which is also the work
+// buffer's pixel space: Hyprland draws the whole pass unrotated, so a rotated
+// or flipped monitor needs no conversion before sampling or drawing.
 [[nodiscard]] inline std::optional<CBox> computeWindowBox(PHLWINDOW window, PHLMONITOR monitor) {
     if (!window || !monitor)
         return std::nullopt;
 
     const auto workspace = window->m_workspace;
-    const auto workspaceOffset = workspace && !window->m_pinned
+    const auto workspaceOffset = workspace && !(window->m_state & Desktop::View::WINDOW_STATE_PINNED)
         ? workspace->m_renderOffset->value()
         : Vector2D();
 
     auto box = window->getWindowMainSurfaceBox();
     box.translate(workspaceOffset);
-    box.translate(-monitor->m_position + window->m_floatingOffset);
+    box.translate(-monitor->m_position + window->presentation().floatingOffset());
     box.scale(monitor->m_scale);
     box.round();
     return box;
@@ -38,27 +42,14 @@ namespace WindowGeometry {
 
     // A slide translates content under a still window with no geometry change
     // of its own; only relevant while the workspace is actually animating.
-    if (workspace && workspace->m_renderOffset->isBeingAnimated() && !window->m_pinned)
+    if (workspace && workspace->m_renderOffset->isBeingAnimated() && !(window->m_state & Desktop::View::WINDOW_STATE_PINNED))
         box.translate(workspace->m_renderOffset->value());
-    box.translate(window->m_floatingOffset);
+    box.translate(window->presentation().floatingOffset());
 
     const auto monitor = window->m_monitor.lock();
     const float scale = monitor ? monitor->m_scale : 1.0f;
     box.expand(paddingPx / scale);
 
-    return box;
-}
-
-// The monitor transform CGlassDecoration::renderPass() applies to its own
-// transformBox, factored out so CGlassPassElement::needsLiveBlur() can apply
-// it identically to the box it evaluates wantsBackgroundResample() against —
-// the two must agree on 90/270-degree-rotated monitors.
-[[nodiscard]] inline CBox applyMonitorTransform(CBox box, PHLMONITOR monitor) {
-    if (!monitor)
-        return box;
-
-    const auto transform = Math::wlTransformToHyprutils(Math::invertTransform(monitor->m_transform));
-    box.transform(transform, monitor->m_transformedSize.x, monitor->m_transformedSize.y);
     return box;
 }
 

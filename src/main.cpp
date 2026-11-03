@@ -12,6 +12,7 @@
 #include "GlassSubsurfacePassElement.hpp"
 #include "GlassSubsurfaceState.hpp"
 #include "Globals.hpp"
+#include "Hash.hpp"
 #include "ItemHints.hpp"
 #include "LoadGuard.hpp"
 #include "PluginConfig.hpp"
@@ -19,8 +20,11 @@
 #include "SubsurfaceGeometry.hpp"
 
 #include <hyprland/src/Compositor.hpp>
-#include <hyprland/src/desktop/Workspace.hpp>
+#include <hyprland/src/desktop/state/FadingOutState.hpp>
+#include <hyprland/src/desktop/view/window/WindowPresentation.hpp>
+#include <hyprland/src/workspace/HLWorkspace.hpp>
 #include <hyprland/src/desktop/view/LayerSurface.hpp>
+#include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/state/WorkspaceState.hpp>
 #include <hyprland/src/state/MonitorState.hpp>
 #include <hyprland/src/managers/eventLoop/EventLoopManager.hpp>
@@ -43,7 +47,6 @@
 #include <cstdlib>
 #include <dlfcn.h>
 #include <optional>
-#include <sstream>
 
 static void clearLayerGlassOnClose(PHLLS layerSurface) {
     if (!g_pGlobalState || !layerSurface)
@@ -70,12 +73,42 @@ static void onMonitorGone(PHLMONITOR monitor) {
     g_pGlobalState->backgroundSnapshots.erase(monitor->m_id);
 }
 
+// A transform, scale or mode change on a live monitor leaves boxes that read as unchanged
+// while the pixels behind them are not: no per-window event reports it, so every cached
+// sample (windows, layers, items) is stale and the x-ray snapshot no longer matches.
+static void onMonitorLayoutChanged() {
+    if (!g_pGlobalState)
+        return;
+
+    for (const auto& monitor : State::monitorState()->monitors()) {
+        if (!monitor)
+            continue;
+
+        g_pGlobalState->bumpSceneGeneration(monitor);
+        if (const auto snapshot = g_pGlobalState->backgroundSnapshots.find(monitor->m_id); snapshot != g_pGlobalState->backgroundSnapshots.end())
+            snapshot->second.valid = CRegion{};
+    }
+}
+
+// A closing window is drawn from a snapshot with no decoration draw(), so it drops out of the
+// fingerprint once and nothing else changes while it fades or when it is gone. Folding the
+// fade-outs makes every fade step and their removal a change; with none, nothing is folded.
+static void foldFadeouts(const PHLMONITOR& monitor, size_t& hash) {
+    for (const auto& fadeout : Desktop::fadingOutState()->fadeouts()) {
+        if (!fadeout || fadeout->monitor() != monitor)
+            continue;
+
+        const auto box = fadeout->renderBox();
+        Hash::hashCombine(hash, fadeout.get(), fadeout->alpha(), box.x, box.y, box.w, box.h);
+    }
+}
+
 static void onNewWindow(PHLWINDOW window) {
-    if (std::ranges::any_of(window->m_windowDecorations,
+    if (std::ranges::any_of(window->presentation().decorations(),
                             [](const auto& decoration) { return decoration->getDisplayName() == "HyprGlass"; }))
         return;
 
-    auto decoration = makeUnique<CGlassDecoration>(window);
+    auto decoration = makeShared<CGlassDecoration>(window);
     g_pGlobalState->decorations.emplace_back(decoration);
     decoration->m_self = decoration;
     HyprlandAPI::addWindowDecoration(PHANDLE, window, std::move(decoration));
@@ -100,7 +133,7 @@ CGlassDecoration* glassDecorationFor(const PHLWINDOW& window) {
 // Hyprland skips window decorations when internal fullscreen mode is
 // FSMODE_FULLSCREEN, queue the glass pass from RENDER_PRE_WINDOW to avoid double-queue.
 // The caller has already gated on the real monitor pass and locked both handles.
-static void drawGlassForFullscreenWindow(const PHLWINDOW& window, const PHLMONITOR& monitor) {
+static void drawGlassForFullscreenWindow(Render::CRenderContext& ctx, const PHLWINDOW& window, const PHLMONITOR& monitor) {
     // decorations render normally, draw() already ran
     if (Fullscreen::controller()->getFullscreenModes(window).internal != Fullscreen::FSMODE_FULLSCREEN)
         return;
@@ -110,7 +143,21 @@ static void drawGlassForFullscreenWindow(const PHLWINDOW& window, const PHLMONIT
         return;
 
     if (auto* deco = glassDecorationFor(window))
-        deco->draw(monitor, 1.f); // alpha unused, recomputed in renderPass
+        deco->draw(ctx, monitor, 1.f, window->presentation().renderPresentation(dynamicPointerCast<Workspace::CWorkspacePresentable>(window->m_workspace))); // alpha unused, recomputed in renderPass
+}
+
+// Hyprland draws X11 override-redirect and no-border windows (menus, tooltips, splash) without
+// decorations, yet they still fade in and out over glass, so draw() never folds them into the
+// render-order fingerprint. Fullscreen ones are folded by drawGlassForFullscreenWindow().
+static void foldUndecoratedWindow(Render::CRenderContext& ctx, const PHLWINDOW& window, const PHLMONITOR& monitor) {
+    if (!window->backend().traits().suggestsNoBorder ||
+        Fullscreen::controller()->getFullscreenModes(window).internal == Fullscreen::FSMODE_FULLSCREEN)
+        return;
+
+    if (auto* deco = glassDecorationFor(window)) {
+        const auto presentation = window->presentation().renderPresentation(dynamicPointerCast<Workspace::CWorkspacePresentable>(window->m_workspace));
+        deco->foldRenderFingerprint(ctx, monitor, presentation.alpha * presentation.fadeAlpha);
+    }
 }
 
 // ── Duplicate window copies ──────────────────────────────────────────────────
@@ -120,7 +167,7 @@ static void drawGlassForFullscreenWindow(const PHLWINDOW& window, const PHLMONIT
 static bool otherSpecialWorkspaceVisible(const PHLWORKSPACE& workspace) {
     for (const auto& ref : State::workspaceState()->workspaces()) {
         const auto other = ref.lock();
-        if (!other || other == workspace || !other->m_isSpecialWorkspace)
+        if (!other || other == workspace || other->type() != Workspace::eWorkspaceType::SPECIAL)
             continue;
         if (other->m_alpha->value() > 0.f)
             return true;
@@ -140,16 +187,16 @@ static bool isRedundantCopy(const PHLWINDOW& window, const PHLMONITOR& monitor) 
     const auto& dedupe = g_pGlobalState->dedupe;
 
     // the "and floating ones too" loop, below the fullscreen window
-    if (!window->m_isFloating)
+    if (!window->isFloating())
         return false;
 
     // pinned windows get a third render after the workspace passes, and nothing
     // in the render stages tells it apart from these two
-    if (window->m_pinned)
+    if ((window->m_state & Desktop::View::WINDOW_STATE_PINNED))
         return false;
 
     // the "then render windows over fullscreen" loop must redraw it
-    if (!window->m_isMapped)
+    if (!window->mapped())
         return false;
 
     // this must be the copy below the fullscreen window, which is rendered
@@ -173,36 +220,40 @@ static bool isRedundantCopy(const PHLWINDOW& window, const PHLMONITOR& monitor) 
     if (!fullscreenWindow || fullscreenWindow->m_workspace != workspace || !Fullscreen::controller()->isFullscreen(fullscreenWindow))
         return false;
 
-    if (window->m_monitor == workspace->m_monitor && workspace->m_isSpecialWorkspace != window->onSpecialWorkspace())
+    if (window->m_monitor == workspace->m_monitor && (workspace->type() == Workspace::eWorkspaceType::SPECIAL) != window->onSpecialWorkspace())
         return false;
-    if (workspace->m_isSpecialWorkspace && (window->m_monitor != workspace->m_monitor || otherSpecialWorkspaceVisible(workspace)))
+    if (workspace->type() == Workspace::eWorkspaceType::SPECIAL && (window->m_monitor != workspace->m_monitor || otherSpecialWorkspaceVisible(workspace)))
         return false;
 
     if (window->isFadingOutUnderFullscreen() || !window->shouldRenderOverFullscreen())
         return false;
 
     // the pre-filter both loops share
-    if (window->alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * window->alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) == 0.f)
+    if (window->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FADE) * window->presentation().alphaValue(Desktop::View::WINDOW_ALPHA_FULLSCREEN) == 0.f)
         return false;
 
     return g_pHyprRenderer->shouldRenderWindow(window, monitor);
 }
 
-static void beginWindowRender() {
+static void beginWindowRender(Render::CRenderContext& ctx) {
+    // Before any early return: snapshots and foreign renders queue their glass
+    // into the pass they render, and before the dedupe redirect below.
+    g_pGlobalState->dedupe.windowPass = &g_pHyprRenderer->currentPass(ctx);
+
     // the real monitor pass only: overview/screencopy framebuffers and snapshots
     // render the window once and have no scene behind to sample
-    if (g_pHyprRenderer->m_renderData.projectionType != Render::RPT_MONITOR || g_pHyprRenderer->m_bRenderingSnapshot)
+    if (ctx.m_data.projectionType != Render::RPT_MONITOR || ctx.m_renderingSnapshot)
         return;
 
-    const auto window  = g_pHyprRenderer->m_renderData.currentWindow.lock();
-    const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+    const auto window  = ctx.m_data.currentWindow.lock();
+    const auto monitor = ctx.m_data.pMonitor.lock();
     if (!window || !monitor)
         return;
 
     // overview/thumbnail plugins render this window standalone into their own
     // framebuffer — a foreign replay must not touch dedupe bookkeeping either,
     // not just skip glass.
-    if (RenderGuards::isForeignRender())
+    if (RenderGuards::isForeignRender(ctx))
         return;
 
     auto& dedupe = g_pGlobalState->dedupe;
@@ -214,20 +265,21 @@ static void beginWindowRender() {
             dedupe.sawFullscreen = true;
         // renderWindow queues its surfaces, shadow and border through
         // addPassElement, so redirecting the pass for its duration drops that
-        // whole copy. Popups bypass it (m_renderPass.add) and still land under
-        // the fullscreen window. Our own glass is skipped in queueGlassPass.
+        // whole copy, popups included. Our own glass is skipped in queueGlassPass.
         else if (!dedupe.guard && isRedundantCopy(window, monitor)) {
             dedupe.sink.clear();
-            dedupe.guard = g_pHyprRenderer->redirectPass(&dedupe.sink);
+            dedupe.guard = g_pHyprRenderer->redirectPass(ctx, &dedupe.sink);
             dedupe.dropped.push_back(window.get());
         }
     }
 
-    drawGlassForFullscreenWindow(window, monitor);
+    foldUndecoratedWindow(ctx, window, monitor);
+    drawGlassForFullscreenWindow(ctx, window, monitor);
 }
 
 static void endWindowRender() {
     auto& dedupe = g_pGlobalState->dedupe;
+    dedupe.windowPass = nullptr;
     if (!dedupe.guard)
         return;
 
@@ -235,30 +287,35 @@ static void endWindowRender() {
     dedupe.sink.clear();
 }
 
-static void onRenderStage(eRenderStage stage) {
+static void onRenderStage(const Event::SRenderStageEvent event) {
     if (!g_pGlobalState)
         return;
 
-    switch (stage) {
+    switch (event.stage) {
         case RENDER_BEGIN:
             // one serial per monitor frame, including the solitary fast path
             // which emits no RENDER_PRE_WINDOWS
             ++g_pGlobalState->frameSerial;
             g_pGlobalState->dedupe.reset();
-            if (const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock())
+            if (const auto monitor = event.monitor)
                 Diagnostics::recordFrame(monitor->m_id);
             // Subsurface item glass has no per-surface destroy signal to hang
             // an eager erase off (unlike layers/windows), so dead entries are
             // swept here instead — once per monitor frame, far cheaper than
             // the CRenderPass::add hook this state is populated from.
             std::erase_if(g_pGlobalState->subsurfaceGlass, [](const auto& pair) { return pair.first.expired(); });
-            beginXraySnapshotFrame();
+            if (event.context)
+                beginXraySnapshotFrame(event.context->get());
             break;
         case RENDER_PRE_WINDOWS:
             g_pGlobalState->dedupe.resetEpoch();
-            queueXraySnapshot();
+            if (event.context)
+                queueXraySnapshot(event.context->get());
             break;
-        case RENDER_PRE_WINDOW: beginWindowRender(); break;
+        case RENDER_PRE_WINDOW:
+            if (event.context)
+                beginWindowRender(event.context->get());
+            break;
         case RENDER_POST_WINDOW: endWindowRender(); break;
         // defensive: both stages are past the last renderWindow of the frame, so
         // a leaked guard is released and the sink drops its buffer references
@@ -269,98 +326,6 @@ static void onRenderStage(eRenderStage stage) {
 }
 
 // ── Layer surface support ────────────────────────────────────────────────────
-
-// Parse comma-separated config string into a set of trimmed values.
-static void parseCommaSeparated(StringConfigPtr configPtr, std::unordered_set<std::string>& out) {
-    out.clear();
-    const auto raw = readStringConfig(configPtr);
-    if (raw.empty()) return;
-
-    std::istringstream stream{std::string(raw)};
-    std::string token;
-    while (std::getline(stream, token, ',')) {
-        auto start = token.find_first_not_of(" \t");
-        auto end   = token.find_last_not_of(" \t");
-        if (start != std::string::npos)
-            out.insert(token.substr(start, end - start + 1));
-    }
-}
-
-// Parse comma-separated "key<sep>value" pairs. The callback receives (key, valueStr) for each pair.
-template <typename Fn>
-static void parseKeyValuePairs(StringConfigPtr configPtr, char separator, Fn&& callback) {
-    const auto raw = readStringConfig(configPtr);
-    if (raw.empty()) return;
-
-    std::istringstream stream{std::string(raw)};
-    std::string token;
-    while (std::getline(stream, token, ',')) {
-        auto sepPos = token.rfind(separator);
-        if (sepPos == std::string::npos) continue;
-
-        auto kStart = token.find_first_not_of(" \t");
-        auto kEnd   = token.find_last_not_of(" \t", sepPos - 1);
-        auto vStart = token.find_first_not_of(" \t", sepPos + 1);
-        auto vEnd   = token.find_last_not_of(" \t");
-
-        if (kStart != std::string::npos && kEnd != std::string::npos &&
-            vStart != std::string::npos && vEnd != std::string::npos && kStart <= kEnd && vStart <= vEnd) {
-            callback(token.substr(kStart, kEnd - kStart + 1),
-                     token.substr(vStart, vEnd - vStart + 1));
-        }
-    }
-}
-
-static void parseLayerNamespaceFilters() {
-    const auto& config = g_pGlobalState->config;
-    parseCommaSeparated(config.layersNamespaces, g_pGlobalState->layerNamespaceFilter);
-    parseCommaSeparated(config.layersExcludeNamespaces, g_pGlobalState->layerNamespaceExclude);
-
-    g_pGlobalState->layerNamespacePresets.clear();
-    parseKeyValuePairs(config.layersNamespacePresets, ':', [&](const std::string& ns, const std::string& preset) {
-        g_pGlobalState->layerNamespacePresets.emplace(ns, preset);
-    });
-
-    g_pGlobalState->layerNamespaceMaskThresholds.clear();
-    parseKeyValuePairs(config.layersNamespaceMaskThresholds, '=', [&](const std::string& ns, const std::string& val) {
-        try { g_pGlobalState->layerNamespaceMaskThresholds.emplace(ns, std::stof(val)); } catch (...) {}
-    });
-
-    g_pGlobalState->layerNamespaceLiveResample.clear();
-    parseKeyValuePairs(config.layersNamespaceLiveResample, '=', [&](const std::string& ns, const std::string& val) {
-        if (val == "1" || val == "true" || val == "on" || val == "yes")
-            g_pGlobalState->layerNamespaceLiveResample[ns] = true;
-        else if (val == "0" || val == "false" || val == "off" || val == "no")
-            g_pGlobalState->layerNamespaceLiveResample[ns] = false;
-    });
-
-    g_pGlobalState->layerNamespaceMaskModes.clear();
-    parseKeyValuePairs(config.layersNamespaceMaskModes, '=', [&](const std::string& ns, const std::string& val) {
-        if (auto mode = parseLayerMaskMode(val))
-            g_pGlobalState->layerNamespaceMaskModes[ns] = *mode;
-    });
-
-    g_pGlobalState->layerNamespaceMaskFeathers.clear();
-    parseKeyValuePairs(config.layersNamespaceMaskFeathers, '=', [&](const std::string& ns, const std::string& val) {
-        try { g_pGlobalState->layerNamespaceMaskFeathers.emplace(ns, std::stof(val)); } catch (...) {}
-    });
-
-    g_pGlobalState->layerNamespaceShapes.clear();
-    std::string invalidShapes;
-    parseKeyValuePairs(config.layersNamespaceShapes, '=', [&](const std::string& ns, const std::string& val) {
-        if (const auto shape = parseLayerShape(val))
-            g_pGlobalState->layerNamespaceShapes[ns] = *shape;
-        else
-            invalidShapes += (invalidShapes.empty() ? "" : ", ") + ns + "=" + val;
-    });
-    if (!invalidShapes.empty()) {
-        HyprlandAPI::addNotificationV2(PHANDLE, {
-            {"text", "[hyprglass] Ignoring layers:namespace_shapes " + invalidShapes + ": expected ns=inset:radius or ns=top:right:bottom:left:radius."},
-            {"time", (uint64_t)5000},
-            {"color", CHyprColor{1.0, 0.8, 0.2, 1.0}},
-        });
-    }
-}
 
 static bool shouldGlassLayer(PHLLS layerSurface) {
     if (!layerSurface)
@@ -373,7 +338,7 @@ static bool shouldGlassLayer(PHLLS layerSurface) {
         return false;
 
     const auto& include = g_pGlobalState->layerNamespaceFilter;
-    if (include.empty())
+    if (include.empty() || include.contains(LAYER_NAMESPACE_WILDCARD))
         return true;
 
     return include.contains(ns);
@@ -457,7 +422,7 @@ static void refreshSurfaceObserver() {
     BackgroundDamageObserver::refreshEnabled();
 }
 
-using renderLayerFn = void (*)(Render::IHyprRenderer*, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool);
+using renderLayerFn = void (*)(Render::IHyprRenderer*, Render::CRenderContext&, PHLLS, PHLMONITOR, const Time::steady_tp&, bool, bool, bool);
 
 // Mirrors renderLayer()'s abovelock early-out: while locked, every layer is
 // offered twice per frame (workspace pass, then the lockscreen pass) and
@@ -494,11 +459,11 @@ static void releaseContourFields(bool everything) {
     }
 }
 
-static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PHLMONITOR monitor,
-                           const Time::steady_tp& now, bool popups, bool lockscreen) {
+static void hkRenderLayer(Render::IHyprRenderer* thisptr, Render::CRenderContext& ctx, PHLLS layerSurface,
+                           PHLMONITOR monitor, const Time::steady_tp& now, bool popups, bool lockscreen, bool workspaceScene) {
     const auto& config = g_pGlobalState->config;
 
-    // layers:enabled can flip without a config reload (hyprctl keyword), so follow it
+    // layers:enabled can flip without a config reload (hyprctl eval), so follow it
     // here too; this is a no-op once the observer is in the requested state.
     // self_sample is followed from the window path, which resolves it anyway.
     BackgroundDamageObserver::refreshEnabled();
@@ -507,21 +472,21 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
     // pipeline while that snapshot is being captured: the snapshot framebuffer
     // starts transparent/black, so sampling it as a background can bake a black
     // rectangle into the fade-out snapshot.
-    if (g_pHyprRenderer->m_bRenderingSnapshot) {
-        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+    if (ctx.m_renderingSnapshot) {
+        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
         return;
     }
 
     // Leave a foreign render entirely alone: no cache creation, no generation bump,
     // no layer registration. Its framebuffer holds content the real frame must not
     // inherit, and its geometry is not the one our caches are keyed on.
-    if (RenderGuards::isForeignRender()) {
-        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+    if (RenderGuards::isForeignRender(ctx)) {
+        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
         return;
     }
 
     if (layerSkippedForLock(layerSurface, lockscreen)) {
-        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
         return;
     }
 
@@ -531,7 +496,7 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         return !pair.second->getLayerSurface();
     });
 
-    // layers:enabled can be turned off by hyprctl keyword without a config reload: the fields go with it
+    // layers:enabled can be turned off by hyprctl eval without a config reload: the fields go with it
     if (g_pGlobalState->contourScratch.users > 0 && !(config.layersEnabled && **config.layersEnabled))
         releaseContourFields(true);
 
@@ -548,15 +513,15 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
             it = layerStates.emplace(rawPtr, std::make_shared<CGlassLayerSurface>(layerSurface)).first;
         }
 
-        if (!layerSurface->m_mapped) {
+        if (!layerSurface->mapped()) {
             it->second->releaseContour();
-            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
             return;
         }
 
         float alpha = layerSurface->alpha().getTotal();
         if (alpha < 0.001f) {
-            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
             return;
         }
 
@@ -567,7 +532,7 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         if (maskSource != CGlassLayerSurface::EMaskSource::CONTOUR)
             it->second->releaseContour();
         if (maskSource == CGlassLayerSurface::EMaskSource::NONE) {
-            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+            ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
             return;
         }
 
@@ -579,7 +544,7 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
 
         // Pre-surface: sample+blur background, redirect currentFB → temp FBO
         CGlassLayerPassElement::SGlassLayerPassData preData{it->second, alpha, xray};
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassLayerPassElement>(preData));
+        g_pHyprRenderer->currentPass(ctx).add(makeUnique<CGlassLayerPassElement>(preData));
 
         const bool manageBlur = config.layersManageBlur && **config.layersManageBlur;
         std::optional<SLayerBlurSuppression> blurSuppression;
@@ -591,19 +556,19 @@ static void hkRenderLayer(Render::IHyprRenderer* thisptr, PHLLS layerSurface, PH
         // Original renderLayer: surface renders into the redirected temp FBO.
         // The suppression must wrap only this call: shouldBlur() runs inside it,
         // and the composite element must later see the real protocol state.
-        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+        ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
         blurSuppression.reset();
 
         // Post-surface: restore currentFB, apply glass masked by temp FBO alpha, blit surface
         CGlassLayerCompositeElement::SGlassLayerCompositeData postData{it->second, alpha, maskSource};
-        g_pHyprRenderer->m_renderPass.add(makeUnique<CGlassLayerCompositeElement>(postData));
+        g_pHyprRenderer->currentPass(ctx).add(makeUnique<CGlassLayerCompositeElement>(postData));
 
         it->second->damageIfMoved();
         return;
     }
 
     // Call the original renderLayer
-    ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, layerSurface, monitor, now, popups, lockscreen);
+    ((renderLayerFn)g_pGlobalState->renderLayerHook->m_original)(thisptr, ctx, layerSurface, monitor, now, popups, lockscreen, workspaceScene);
 }
 
 // ── Subsurface item glass support ────────────────────────────────────────────
@@ -664,8 +629,9 @@ static void hkRenderPassAdd(Render::CRenderPass* pass, UP<IPassElement>&& el) {
     // sampling one as a background would bake that into the snapshot, same
     // reasoning as hkRenderLayer. A foreign render (overview/screencopy replay,
     // or one with its own render modifier already set) must not create or
-    // touch any of our per-surface state either.
-    if (g_pHyprRenderer->m_bRenderingSnapshot || RenderGuards::isForeignRender()) {
+    // touch any of our per-surface state either. The hook gets no ctx, but the
+    // renderer's context is the only one, snapshots included.
+    if (RenderGuards::shouldSkipGlass(g_pHyprRenderer->context())) {
         callOriginalRenderPassAdd(pass, std::move(el));
         return;
     }
@@ -705,9 +671,7 @@ static void hkRenderPassAdd(Render::CRenderPass* pass, UP<IPassElement>&& el) {
         return;
     }
 
-    const CBox rawBox       = *pixelBox;
-    const CBox transformBox = SubsurfaceGeometry::toTransformBox(rawBox, monitor);
-    CRegion    region       = SubsurfaceGeometry::transformedItemBlurRegion(data.surface, rawBox, monitor);
+    CRegion region = SubsurfaceGeometry::transformedItemBlurRegion(data.surface, *pixelBox, monitor);
     if (region.empty()) {
         // A background effect was declared but nothing is left to glass this
         // frame (e.g. an explicit empty region, or clipped fully outside the
@@ -732,7 +696,7 @@ static void hkRenderPassAdd(Render::CRenderPass* pass, UP<IPassElement>&& el) {
     const float alpha = std::clamp(data.alpha * data.fadeAlpha, 0.0f, 1.0f);
 
     // Pre-surface: sample+blur background, redirect currentFB → temp FBO.
-    CGlassSubsurfacePassElement::SData preData{it->second, itemLogicalBox, transformBox, data.pMonitor, alpha};
+    CGlassSubsurfacePassElement::SData preData{it->second, itemLogicalBox, *pixelBox, data.pMonitor, alpha};
     callOriginalRenderPassAdd(pass, makeUnique<CGlassSubsurfacePassElement>(preData));
 
     // The surface element itself: Hyprland's own draw() call renders it into
@@ -741,7 +705,7 @@ static void hkRenderPassAdd(Render::CRenderPass* pass, UP<IPassElement>&& el) {
 
     // Post-surface: restore currentFB, composite glass masked by the protocol
     // region with the item's own foreground (from the temp FBO) on top.
-    CGlassSubsurfaceCompositeElement::SData postData{it->second, itemLogicalBox, rawBox, transformBox, std::move(region), data.pMonitor, alpha};
+    CGlassSubsurfaceCompositeElement::SData postData{it->second, itemLogicalBox, *pixelBox, std::move(region), data.pMonitor, alpha};
     callOriginalRenderPassAdd(pass, makeUnique<CGlassSubsurfaceCompositeElement>(postData));
 }
 
@@ -786,21 +750,19 @@ static void ensureShadowsForWindowGlass() {
     if (!shadowEnabled.dataptr || !shadowEnabled.type)
         return;
 
-    if (*shadowEnabled.type == typeid(Hyprlang::INT)) {
-        if (!**reinterpret_cast<Hyprlang::INT* const*>(shadowEnabled.dataptr))
-            HyprlandAPI::invokeHyprctlCommand("keyword", "decoration:shadow:enabled true");
-    } else if (*shadowEnabled.type == typeid(Config::BOOL)) {
-        // Lua config: set the value the way hl.config() does at runtime. hyprctl
-        // eval would do the same but also clears the list hyprctl configerrors shows.
-        auto* const shadow = *reinterpret_cast<Config::BOOL* const*>(shadowEnabled.dataptr);
-        if (!*shadow) {
-            *shadow = true;
-            Config::Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_WINDOW_STATES);
-        }
+    if (*shadowEnabled.type != typeid(Config::BOOL))
+        return;
+
+    // Set the value the way hl.config() does at runtime. hyprctl eval would do
+    // the same but also clears the list hyprctl configerrors shows.
+    auto* const shadow = *reinterpret_cast<Config::BOOL* const*>(shadowEnabled.dataptr);
+    if (!*shadow) {
+        *shadow = true;
+        Config::Supplementary::refresher()->scheduleRefresh(Config::Supplementary::REFRESH_WINDOW_STATES);
     }
 }
 
-// Deferred so the keyword never runs inside a config reload or a render pass
+// Deferred so the value is never written inside a config reload or a render pass
 void scheduleShadowsForWindowGlass() {
     if (g_pGlobalState && g_pEventLoopManager)
         g_pGlobalState->shadowFixLock = g_pEventLoopManager->doLaterLock([] { ensureShadowsForWindowGlass(); });
@@ -808,12 +770,16 @@ void scheduleShadowsForWindowGlass() {
 
 // ── Hook target resolution ───────────────────────────────────────────────────
 
-// Hyprland 0.56.2 symbols. Itanium mangling encodes the full signature, so a
-// match is exactly the overload the hooks were written for.
+// Hyprland 0.57.0 symbols. Itanium mangling encodes the full signature, so a match is exactly the overload the hooks were written for.
 namespace HookSymbols {
     inline constexpr auto RENDER_LAYER =
-        "_ZN6Render13IHyprRenderer11renderLayerEN9Hyprutils6Memory14CSharedPointerIN7Desktop4View13CLayerSurfaceEEENS3_IN7Monitor8CMonitorEEERKNSt6chrono10time_"
-        "pointINSB_3_V212steady_clockENSB_8durationIlSt5ratioILl1ELl1000000000EEEEEEbb";
+        "_ZN6Render13IHyprRenderer11renderLayerERNS_14CRenderContextEN9Hyprutils6Memory14CSharedPointerIN7Desktop4View13CLayerSurfaceEEENS5_IN7Monitor8CMonitorEEERKNSt6chrono10time_"
+        "pointINSD_3_V212steady_clockENSD_8durationIlSt5ratioILl1ELl1000000000EEEEEEbbb";
+    // The same overload as findFunctionsByName() reports it (nm --demangle=auto): the fallback accepts this exact signature only, so another arity is never hooked.
+    inline constexpr auto RENDER_LAYER_DEMANGLED =
+        "Render::IHyprRenderer::renderLayer(Render::CRenderContext&, Hyprutils::Memory::CSharedPointer<Desktop::View::CLayerSurface>, "
+        "Hyprutils::Memory::CSharedPointer<Monitor::CMonitor>, std::chrono::time_point<std::chrono::_V2::steady_clock, "
+        "std::chrono::duration<long, std::ratio<1l, 1000000000l> > > const&, bool, bool, bool)";
     inline constexpr auto RENDER_PASS_ADD = "_ZN6Render11CRenderPass3addEON9Hyprutils6Memory14CUniquePointerI12IPassElementEE";
 }
 
@@ -884,6 +850,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.removed.listen([](PHLMONITOR monitor) { onMonitorGone(monitor); }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.destroyMon.listen([](PHLMONITOR monitor) { onMonitorGone(monitor); }));
+    g_pGlobalState->listeners.push_back(Event::bus()->m_events.monitor.layoutChanged.listen([]() { onMonitorLayoutChanged(); }));
 
     // Z-order / visibility changes invalidate layer glass caches on the affected monitor only.
     // Per-monitor to avoid triggering re-samples on idle monitors (feedback loop).
@@ -907,24 +874,28 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
         }));
 
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.render.stage.listen(
-        [](eRenderStage stage) { onRenderStage(stage); }));
+        [](Event::SRenderStageEvent event) { onRenderStage(event); }));
 
-    // Render-order fingerprint: reset the running hash at RENDER_BEGIN, then at
-    // RENDER_LAST_MOMENT compare it to last frame's and bump scene generation on
-    // a change. Both fire inside renderMonitor() strictly before endRender() runs
-    // the render pass, so a bump here reaches this same frame's resample checks.
+    // Render-order fingerprint: restart the running hash at RENDER_BEGIN with the
+    // monitor's fade-outs, then at RENDER_LAST_MOMENT compare it to last frame's and
+    // bump scene generation on a change. Both fire inside renderMonitor() strictly
+    // before endRender() runs the render pass, so a bump here reaches this same
+    // frame's resample checks.
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.render.stage.listen(
-        [](eRenderStage stage) {
-            if (stage != RENDER_BEGIN)
+        [](Event::SRenderStageEvent event) {
+            if (event.stage != RENDER_BEGIN)
                 return;
-            if (const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock())
-                g_pGlobalState->renderFingerprints[monitor->m_id].runningHash = 0;
+            if (const auto monitor = event.monitor) {
+                auto& fingerprint       = g_pGlobalState->renderFingerprints[monitor->m_id];
+                fingerprint.runningHash = 0;
+                foldFadeouts(monitor, fingerprint.runningHash);
+            }
         }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.render.stage.listen(
-        [](eRenderStage stage) {
-            if (stage != RENDER_LAST_MOMENT)
+        [](Event::SRenderStageEvent event) {
+            if (event.stage != RENDER_LAST_MOMENT)
                 return;
-            const auto monitor = g_pHyprRenderer->m_renderData.pMonitor.lock();
+            const auto monitor = event.monitor;
             if (!monitor)
                 return;
             auto& fingerprint = g_pGlobalState->renderFingerprints[monitor->m_id];
@@ -942,8 +913,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
 
     // Clear pending presets/layers before config re-parse, commit after
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.config.preReload.listen([&]() {
-        clearPendingPresets();
-        clearPendingLayers();
+        beginConfigReload();
     }));
 
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.config.reloaded.listen([&]() {
@@ -951,8 +921,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
             return;
         initConfigPointers(PHANDLE, g_pGlobalState->config);
         commitPendingPresets();
-        parseLayerNamespaceFilters();
-        commitPendingLayers(); // merge Lua layer() calls on top of string config
+        commitPendingLayers(); // apply hg.layer() entries
         validateConfig();
         // a layer namespace or mask mode that no longer asks for contour keeps no field
         releaseContourFields(false);
@@ -973,15 +942,15 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     g_pEventLoopManager->addTimer(s_settingsWatch);
 
     for (auto& window : Desktop::viewState()->windows()) {
-        if (window->isHidden() || !window->m_isMapped)
+        if (window->isHidden() || !window->mapped())
             continue;
         onNewWindow(window);
     }
 
     // Hook renderLayer for layer surface glass support
-    // Fallback match for the overload Render::IHyprRenderer::renderLayer(PHLLS, PHLMONITOR, steady_tp, bool, bool)
+    // Fallback match for the overload Render::IHyprRenderer::renderLayer(CRenderContext&, PHLLS, PHLMONITOR, steady_tp, bool, bool, bool)
     void* const renderLayerAddress = resolveHyprlandFunction(HookSymbols::RENDER_LAYER, "renderLayer", [](const SFunctionMatch& match) {
-        return match.demangled.contains("renderLayer") && match.demangled.contains("LayerSurface");
+        return match.demangled == HookSymbols::RENDER_LAYER_DEMANGLED;
     });
     const bool renderLayerFound = renderLayerAddress != nullptr;
     if (renderLayerFound) {
@@ -1030,7 +999,6 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
     // Until then the values parsed so far are committed here.
     initConfigPointers(PHANDLE, g_pGlobalState->config);
     commitPendingPresets();
-    parseLayerNamespaceFilters();
     commitPendingLayers();
     validateConfig();
     refreshSurfaceObserver();
@@ -1068,12 +1036,14 @@ APICALL EXPORT void PLUGIN_EXIT() {
     // drop the redirect and the sink's elements while the plugin is still mapped
     g_pGlobalState->dedupe.reset();
 
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassPassElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerPassElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassLayerCompositeElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassSubsurfacePassElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassSubsurfaceCompositeElement");
-    g_pHyprRenderer->m_renderPass.removeAllOfType("CGlassSnapshotElement");
+    // Outside a render the context pass is empty: defence in depth only.
+    auto& pass = g_pHyprRenderer->context().m_pass;
+    pass.removeAllOfType("CGlassPassElement");
+    pass.removeAllOfType("CGlassLayerPassElement");
+    pass.removeAllOfType("CGlassLayerCompositeElement");
+    pass.removeAllOfType("CGlassSubsurfacePassElement");
+    pass.removeAllOfType("CGlassSubsurfaceCompositeElement");
+    pass.removeAllOfType("CGlassSnapshotElement");
     g_pGlobalState->backgroundSnapshots.clear();
 
     Diagnostics::shutdown();
