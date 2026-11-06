@@ -1,4 +1,5 @@
 #include "Genie.hpp"
+#include "Touch.hpp"
 #include "GlassDecoration.hpp"
 #include "BackgroundDamageObserver.hpp"
 #include "BuiltInPresets.hpp"
@@ -711,7 +712,7 @@ void CGlassDecoration::renderPass(Render::CRenderContext& ctx, PHLMONITOR monito
                                      windowBox, glassAlpha,
                                      std::array<float, 4>{cornerRadius, cornerRadius, cornerRadius, cornerRadius},
                                      roundingPower, m_samplePaddingRatio, resolveContext, nullptr, focusLight,
-                                     frostInput.copy ? &frostInput : nullptr);
+                                     frostInput.copy ? &frostInput : nullptr, TouchLight::pressedOn(window));
 }
 
 eDecorationType CGlassDecoration::getDecorationType() {

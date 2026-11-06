@@ -1,4 +1,5 @@
 #include "GlassLayerSurface.hpp"
+#include "Touch.hpp"
 #include "BackgroundDamageObserver.hpp"
 #include "BuiltInPresets.hpp"
 #include "Diagnostics.hpp"
@@ -775,5 +776,5 @@ void CGlassLayerSurface::compositeAndRestore(Render::CRenderContext& ctx, PHLMON
                                      box, alpha,
                                      std::array<float, 4>{cornerRadius, cornerRadius, cornerRadius, cornerRadius},
                                      roundingPower, m_samplePaddingRatio, resolveContext,
-                                     &maskInfo);
+                                     &maskInfo, 0.0f, nullptr, TouchLight::pressedOn(layerSurface));
 }

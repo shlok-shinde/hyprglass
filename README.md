@@ -7,8 +7,13 @@
 >   body lens, so the whole pane refracts and not just its rim
 > - **shape-from-alpha** for shell layers: each pill, card and dock gets its own bezel instead of
 >   sharing the layer's bounding box
-> - **no key light**: a crisp one-pixel rim that brightens only where it reflects something bright
-> - **touch light**: pressing glass lights it from the press point, and nearby glass catches it
+> - **the Tahoe rim**: a crisp one-pixel rim, with a faint bleed inside it, coloured by what is
+>   behind and near the glass (`1.45 luma + 3 chroma + 0.05`, from macOS 26): bright over bright
+>   content, nearly gone over black. Lit most along the top, with a thin dark line inside it that
+>   shows on the sides, as in iOS 27
+> - **press glow**: pressing glass (mouse button or touchscreen) lights it from the press point. A
+>   small control fills with light, a big pane glows around the press, the light follows a drag,
+>   springs in and out, and spreads onto nearby glass (other windows and panels) as it fades
 > - **readable glass**: in dark mode bright backdrops are pulled toward a luminance ceiling, in
 >   light mode dark ones are lifted toward a floor (`adaptive_boost`, milky); shell panels cast a
 >   soft shadow
@@ -16,6 +21,23 @@
 >   and windows that open out of their dock icon (`hyprctl hyprglass launch`)
 > - presets `tahoe_clear`, `tahoe`, `tahoe_window`, and the global settings `tinted`,
 >   `edge_highlight` and `lens`
+>
+> Settings this fork adds, global and live (`hl.plugin.hyprglass.config({ ... })`):
+>
+> | Option | Default | Description |
+> |---|---|---|
+> | `press_glow` | `1` | The press glow: `0` off, `1` subtle (Apple's 26.1 and later), `2` bright (26.0, with a little overshoot) |
+> | `press_spill` | `0.5` | How much of the glow nearby glass catches (0.0-1.0) |
+> | `highlight_direction` | `1` | Where the rim is lit: `0` all round, `1` along the top, `2` from the top left |
+> | `dark_edge` | `1.0` | The thin dark line inside the rim (0.0-1.0; drawn at 0.88 in dark mode, 0.43 in light) |
+> | `near_reflection` | `0.5` | How much the rim takes its colour from just outside the glass rather than from behind it (0.0-1.0) |
+>
+> The rim replaces upstream's bevel light: `bevel_strength` and `bevel_color` still set its
+> strength and colour, `bevel_size`, `bevel_tint` and `bevel_angle` no longer do anything.
+>
+> Testing the glow without a finger: `hyprctl hyprglass touch X Y [hold_ms]` (a press and release
+> at global layout coordinates), `touch-hold X Y` and `touch-release`, `touch-path X1 Y1 X2 Y2 ms`
+> (a press dragged along a line, then let go) and `touch-probe X Y` (what glass is there).
 >
 > Everything below is upstream's documentation and still applies. Build this branch with `make`
 > against your Hyprland's headers. All credit for the plugin itself goes to its upstream authors;

@@ -61,6 +61,10 @@ std::optional<EDebugMode> parseDebugMode(std::string_view value) {
     return std::nullopt;
 }
 
+float settingOr(Config::FLOAT* const* setting, float fallback) {
+    return setting && *setting ? static_cast<float>(**setting) : fallback;
+}
+
 float tintedAmount() {
     if (!g_pGlobalState || !g_pGlobalState->config.tinted)
         return 0.0f;
@@ -81,6 +85,11 @@ void registerConfig(HANDLE handle) {
     addConfigValue<Config::Values::Float>(handle, ConfigKeys::TINTED, Config::FLOAT{0.0});
     addConfigValue<Config::Values::Float>(handle, ConfigKeys::EDGE_HIGHLIGHT, Config::FLOAT{1.0});
     addConfigValue<Config::Values::Float>(handle, ConfigKeys::LENS, Config::FLOAT{1.0});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::PRESS_GLOW, Config::FLOAT{1.0});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::PRESS_SPILL, Config::FLOAT{0.5});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::HIGHLIGHT_DIRECTION, Config::FLOAT{1.0});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::DARK_EDGE, Config::FLOAT{1.0});
+    addConfigValue<Config::Values::Float>(handle, ConfigKeys::NEAR_REFLECTION, Config::FLOAT{0.5});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_THEME, Config::STRING{"dark"});
     addConfigValue<Config::Values::String>(handle, ConfigKeys::DEFAULT_PRESET, Config::STRING{"default"});
 
@@ -323,6 +332,11 @@ void initConfigPointers(HANDLE handle, SPluginConfig& config) {
     config.tinted            = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::TINTED);
     config.edgeHighlight     = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::EDGE_HIGHLIGHT);
     config.lens              = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::LENS);
+    config.pressGlow          = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::PRESS_GLOW);
+    config.pressSpill         = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::PRESS_SPILL);
+    config.highlightDirection = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::HIGHLIGHT_DIRECTION);
+    config.darkEdge           = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::DARK_EDGE);
+    config.nearReflection     = getStaticPtr<Config::FLOAT>(handle, ConfigKeys::NEAR_REFLECTION);
     config.xpMode            = getBoolPtr(handle, "render:xp_mode");
     config.animationsEnabled = getBoolPtr(handle, "animations:enabled");
     config.defaultTheme  = getStringPtr(handle, ConfigKeys::DEFAULT_THEME);

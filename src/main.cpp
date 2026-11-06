@@ -344,21 +344,27 @@ static bool shouldGlassLayer(PHLLS layerSurface) {
     return include.contains(ns);
 }
 
-// The shell's Liquid glass settings (tinted, edge_highlight, lens) arrive
+// The shell's Liquid glass settings (tinted, edge_highlight, lens, the press
+// glow and rim settings) arrive
 // through `hyprctl eval`, which changes values without a config reload and
 // without repainting anything. Watch them and repaint, resampling the
 // backdrop (tinted changes the blur), whenever one changes.
 static SP<CEventLoopTimer>  s_settingsWatch;
-static std::array<float, 3> s_lastSettings{-1.f, -1.f, -1.f};
+static std::array<float, 8> s_lastSettings{-1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f, -1.f};
 
 static void watchSettings() {
     if (!g_pGlobalState)
         return;
     const auto& config = g_pGlobalState->config;
-    const std::array<float, 3> now{
+    const std::array<float, 8> now{
         tintedAmount(),
-        config.edgeHighlight ? static_cast<float>(**config.edgeHighlight) : 1.f,
-        config.lens ? static_cast<float>(**config.lens) : 1.f,
+        settingOr(config.edgeHighlight, 1.f),
+        settingOr(config.lens, 1.f),
+        settingOr(config.pressGlow, 1.f),
+        settingOr(config.pressSpill, 0.5f),
+        settingOr(config.highlightDirection, 1.f),
+        settingOr(config.darkEdge, 1.f),
+        settingOr(config.nearReflection, 0.5f),
     };
     if (now != s_lastSettings) {
         if (s_lastSettings[0] >= 0.f) {
@@ -889,6 +895,10 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE handle) {
                 auto& fingerprint       = g_pGlobalState->renderFingerprints[monitor->m_id];
                 fingerprint.runningHash = 0;
                 foldFadeouts(monitor, fingerprint.runningHash);
+                // The touch light's coming, letting go and going out (not each
+                // step): glass stacked above lit panes resamples then, so none
+                // keeps a lit rim in its cached backdrop.
+                Hash::hashCombine(fingerprint.runningHash, TouchLight::phase());
             }
         }));
     g_pGlobalState->listeners.push_back(Event::bus()->m_events.render.stage.listen(

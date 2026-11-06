@@ -220,6 +220,9 @@ struct SFrostInput {
 //
 // frost: windows only, null when the glass is not frosted right now (see SFrostInput).
 //
+// pressedHere: this is the window or layer the touch light was pressed on (it
+// fills with light; every other pane only catches the spill).
+//
 // box: the drawn quad in framebuffer pixels. The glass's up is the screen's up as the
 // user sees it, whatever the monitor's transform.
 void applyGlassEffect(Render::CRenderContext& ctx,
@@ -227,6 +230,7 @@ void applyGlassEffect(Render::CRenderContext& ctx,
                        const CBox& box,
                        float alpha, const std::array<float, 4>& radii, float roundingPower,
                        const Vector2D& paddingRatio, const SResolveContext& resolveContext,
-                       const SMaskInfo* mask = nullptr, float focusLight = 0.0f, const SFrostInput* frost = nullptr);
+                       const SMaskInfo* mask = nullptr, float focusLight = 0.0f, const SFrostInput* frost = nullptr,
+                       bool pressedHere = false);
 
 } // namespace GlassRenderer

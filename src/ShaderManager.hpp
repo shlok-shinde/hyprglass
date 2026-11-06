@@ -69,9 +69,19 @@ struct SGlassUniforms {
     GLint fieldSigmaPx = -1;
 
     // Touch light (Touch.hpp): where the glass is being pressed, box-local px.
-    GLint pressPosPx    = -1;
-    GLint pressGlow     = -1;
-    GLint pressRadiusPx = -1;
+    GLint pressPosPx         = -1;
+    GLint pressGlow          = -1;
+    GLint pressSelf          = -1;
+    GLint pressSpread        = -1;
+    GLint pressSpillRadiusPx = -1;
+    GLint pressWash          = -1;
+    GLint pressRadial        = -1;
+    GLint pressSpill         = -1;
+
+    // Rim light at rest, the dark edge, the rim's colour source
+    GLint highlightDirection = -1;
+    GLint darkEdgeAlpha      = -1;
+    GLint nearReflection     = -1;
 
     // Clear / Tinted (plugin:hyprglass:tinted) and the edge highlight scale
     GLint tinted      = -1;

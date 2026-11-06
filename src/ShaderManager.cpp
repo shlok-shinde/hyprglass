@@ -85,7 +85,15 @@ bool CShaderManager::compileGlassProgram(SGlassProgram& glass, GlassFeatureMask 
     glassUniforms.fieldSigmaPx        = glGetUniformLocation(program, "fieldSigmaPx");
     glassUniforms.pressPosPx          = glGetUniformLocation(program, "pressPosPx");
     glassUniforms.pressGlow           = glGetUniformLocation(program, "pressGlow");
-    glassUniforms.pressRadiusPx       = glGetUniformLocation(program, "pressRadiusPx");
+    glassUniforms.pressSelf           = glGetUniformLocation(program, "pressSelf");
+    glassUniforms.pressSpread         = glGetUniformLocation(program, "pressSpread");
+    glassUniforms.pressSpillRadiusPx  = glGetUniformLocation(program, "pressSpillRadiusPx");
+    glassUniforms.pressWash           = glGetUniformLocation(program, "pressWash");
+    glassUniforms.pressRadial         = glGetUniformLocation(program, "pressRadial");
+    glassUniforms.pressSpill          = glGetUniformLocation(program, "pressSpill");
+    glassUniforms.highlightDirection  = glGetUniformLocation(program, "highlightDirection");
+    glassUniforms.darkEdgeAlpha       = glGetUniformLocation(program, "darkEdgeAlpha");
+    glassUniforms.nearReflection      = glGetUniformLocation(program, "nearReflection");
     glassUniforms.tinted              = glGetUniformLocation(program, "tinted");
     glassUniforms.tintedColor         = glGetUniformLocation(program, "tintedColor");
     glassUniforms.rimLevel            = glGetUniformLocation(program, "rimLevel");

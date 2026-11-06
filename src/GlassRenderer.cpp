@@ -559,7 +559,7 @@ void applyGlassEffect(Render::CRenderContext& ctx,
                        const CBox& box,
                        float alpha, const std::array<float, 4>& radii, float roundingPower,
                        const Vector2D& paddingRatio, const SResolveContext& resolveContext,
-                       const SMaskInfo* mask, float focusLight, const SFrostInput* frost) {
+                       const SMaskInfo* mask, float focusLight, const SFrostInput* frost, bool pressedHere) {
     if (!sampleFramebuffer || !targetFramebuffer)
         return;
 
@@ -733,6 +733,11 @@ void applyGlassEffect(Render::CRenderContext& ctx,
         glUniform3f(uniforms.tintedColor, 0.93f, 0.93f, 0.95f);
     const auto& cfg = g_pGlobalState->config;
     glUniform1f(uniforms.rimLevel, cfg.edgeHighlight ? std::max(static_cast<float>(**cfg.edgeHighlight), 0.0f) : 1.0f);
+    // Rim light at rest (none / top / diagonal), the dark edge (Apple's 27
+    // contour: stronger in dark mode) and where the rim takes its colour from
+    glUniform1i(uniforms.highlightDirection, std::clamp(static_cast<int>(std::lround(settingOr(cfg.highlightDirection, 1.f))), 0, 2));
+    glUniform1f(uniforms.darkEdgeAlpha, std::clamp(settingOr(cfg.darkEdge, 1.f), 0.f, 1.f) * (resolveContext.isDark ? 0.88f : 0.43f));
+    glUniform1f(uniforms.nearReflection, std::clamp(settingOr(cfg.nearReflection, 0.5f), 0.f, 1.f));
 
     // Body lens: how far (px) what is behind a pane is pulled in at its rim.
     // Grows with the pane, capped. Shell layers that cover the whole monitor
@@ -751,7 +756,12 @@ void applyGlassEffect(Render::CRenderContext& ctx,
         const Vector2D local = (light.posGlobal - monitor->m_position) * monitor->m_scale;
         glUniform2f(uniforms.pressPosPx, static_cast<float>(local.x - box.x), static_cast<float>(local.y - box.y));
         glUniform1f(uniforms.pressGlow, light.strength);
-        glUniform1f(uniforms.pressRadiusPx, light.radius * monitor->m_scale);
+        glUniform1f(uniforms.pressSelf, pressedHere ? 1.0f : 0.0f);
+        glUniform1f(uniforms.pressSpread, light.spread);
+        glUniform1f(uniforms.pressSpillRadiusPx, light.spillRadius * monitor->m_scale);
+        glUniform1f(uniforms.pressWash, light.wash);
+        glUniform1f(uniforms.pressRadial, light.radial);
+        glUniform1f(uniforms.pressSpill, light.spill);
     } else
         glUniform1f(uniforms.pressGlow, 0.0f);
 

@@ -24,10 +24,13 @@ precision highp float;
  * 4. Body lens: the whole pane is a shallow convex lens
  * 5. Frosted tint (brightness boost + desaturation)
  * 6. Configurable color tint overlay, then frosted grain
- * 7. Rim: a crisp one-pixel edge, nearly invisible unless it has something
- *    bright to reflect (no key light, no lit corner)
- * 8. Fresnel edge glow (white or tinted by the background)
- * 9. Touch light: lights the glass around a press point, nowhere else
+ * 7. Fresnel edge glow (white or tinted by the background)
+ * 8. Touch light (Liquid Glass's press glow): fills a pressed control, glows
+ *    around the press point, spills onto nearby panes
+ * 9. Rim (Tahoe's): a crisp one-pixel edge made of the content behind it,
+ *    brightened, so it glows over bright content and all but vanishes over
+ *    black; lit at rest from highlight_direction, with a dark contour inside
+ *    the outline (dark_edge) on the walls that light misses
  */
 
 uniform sampler2D tex;
@@ -115,11 +118,21 @@ uniform vec2  fieldUVOffset;   // box UV -> field texture UV
 uniform vec2  fieldUVScale;
 uniform float fieldSigmaPx;    // sigma the field was blurred with, framebuffer px
 
-// Touch light (Touch.hpp). The material has no light source of its own; light
-// enters where it is pressed. Box-local framebuffer px; pressGlow 0 = none.
+// Touch light (Touch.hpp): light enters where the glass is pressed. Box-local
+// framebuffer px; pressGlow 0 = none.
 uniform vec2  pressPosPx;
-uniform float pressGlow;
-uniform float pressRadiusPx;
+uniform float pressGlow;          // the light's envelope (springs, may overshoot 1 a little)
+uniform float pressSelf;          // 1 on the pane that was pressed, 0 on the others
+uniform float pressSpread;        // unused here: the radius below already carries it
+uniform float pressSpillRadiusPx; // how far the light reaches now
+uniform float pressWash;          // flat fill of the pressed pane, near the press
+uniform float pressRadial;        // the glow around the press point
+uniform float pressSpill;         // share of it other panes catch
+
+// Rim light at rest: 0 = none, 1 = top (fainter bottom), 2 = top-left / bottom-right.
+uniform int   highlightDirection;
+uniform float darkEdgeAlpha;      // the contour inside the outline, 0 = none
+uniform float nearReflection;     // the rim's colour: 0 = what is behind it, 1 = what is just outside
 
 // Clear / Tinted (plugin:hyprglass:tinted): tinted panes lean toward
 // tintedColor, the theme's surface colour (their backdrop is also blurred more).
@@ -538,6 +551,7 @@ void main() {
     } else {
         color = sampleBlurred(uv + offG + domeUV).rgb;
     }
+    vec3 raw = color; // what the glass shows, before frost and tone: the rim's colour comes from it
 
 #ifdef HYPRGLASS_FEATURE_FROST
     // Frosted glass (frost): the backdrop was blurred further above; it also gets
@@ -615,25 +629,32 @@ void main() {
     }
 
     // ========================================
-    // TOUCH LIGHT — where the glass is pressed, light gets into it: every rim
-    // within reach of the press point catches it, and small controls glow
-    // through. specular_strength scales it.
+    // TOUCH LIGHT — Liquid Glass's press glow: light enters where the glass is
+    // pressed, fills a small pressed control (the flat wash, near the press on a
+    // big pane), glows around the press point and spills onto other panes within
+    // reach. specular_strength scales it.
     // ========================================
-    float touch = 0.0;   // reaches the rims of everything nearby
-    float spot  = 0.0;   // the glow right under the press
+    float glowLocal = 0.0; // how much press light reaches this pixel, for the rim
+    vec3  glowAdd   = vec3(0.0);
     if (pressGlow > 0.001) {
-        vec2  dp = uv * fullSize - pressPosPx;
-        float r2 = dot(dp, dp) / max(pressRadiusPx * pressRadiusPx, 1.0);
-        touch = pressGlow * specularStrength * exp(-2.0 * r2);
-        spot  = pressGlow * specularStrength * exp(-5.0 * r2);
+        float R      = max(pressSpillRadiusPx, 1.0);
+        float d      = length(uv * fullSize - pressPosPx);
+        float radial = 1.0 - smoothstep(0.5 * R, R, d);
+        float gain   = mix(pressSpill, 1.0, pressSelf);
+        float wash   = pressSelf * pressWash * (1.0 - smoothstep(R, 2.0 * R, d));
+        glowLocal    = pressGlow * radial * gain;
+        glowAdd      = vec3(pressGlow * (wash + pressRadial * radial * gain));
     }
 
     // ========================================
-    // RIM — a crisp one-pixel edge where the slab ends, the same on every
-    // side (there is no key light): a quiet line on its own, brighter where
-    // the edge reflects something bright, and where it is touched.
+    // RIM — Tahoe's: a crisp one-pixel edge made of what is behind it,
+    // brightened and with its colour boosted (macOS 26's highlight matrix:
+    // 1.45 luma + 3 chroma + 0.05), so it glows over bright content and all
+    // but vanishes over black. Lit at rest from highlight_direction; a dark
+    // contour just inside the outline shows on the walls that light misses;
+    // press light gets into it.
     // ========================================
-    if (bevelStrength > 0.001 || touch > 0.001) {
+    {
         float line;
         if (fieldShape) {
             // the pane's outermost pixel row: inside, with a neighbour outside
@@ -644,23 +665,39 @@ void main() {
         } else {
             line = 1.0 - smoothstep(0.0, 1.25, depthPx);
         }
-        float bandW = max(bevelSize * px, 1.0);
-        float band  = exp(-depthPx / bandW) * 0.28;   // only the touch light uses it
 
-        vec3 rimLight = vec3(1.0);
-        if (bevelColorAlpha > 0.001) rimLight = mix(rimLight, bevelColor, bevelColorAlpha);
-        if (bevelTint > 0.001) {
-            float maxC = max(max(tintSource.r, tintSource.g), tintSource.b);
-            rimLight = mix(rimLight, maxC > 0.001 ? tintSource / maxC : vec3(1.0), bevelTint);
+        // how much this wall faces the light (lobe) and how side-on it is to it
+        float lobe = 1.0, sideOn = 1.0;
+        if (highlightDirection == 1) {            // from the top; the bottom catches less
+            sideOn = abs(nOut.x);
+            lobe   = max(1.0 - sideOn, 0.15) * (nOut.y > 0.0 ? 0.6 : 1.0);
+        } else if (highlightDirection == 2) {     // from the top-left; the bottom-right catches less
+            const vec2 L = vec2(-0.70710678, -0.70710678);
+            sideOn = abs(dot(nOut, vec2(-L.y, L.x)));
+            lobe   = max(1.0 - sideOn, 0.15) * (dot(nOut, L) < 0.0 ? 0.6 : 1.0);
         }
-        float rim = line * bevelStrength * rimLevel * (0.42 + 0.58 * env)
-                  + (line * 1.6 + band * 3.0) * touch;
-        color = mix(color, rimLight, clamp(rim, 0.0, 1.0));
+
+        if (darkEdgeAlpha > 0.001) {
+            float cov = fieldShape ? line : clamp(0.75 * px + 0.5 - depthPx, 0.0, 1.0);
+            float dir = highlightDirection == 0 ? 1.0 : mix(1.0, sideOn, 0.77);
+            color *= 1.0 - darkEdgeAlpha * cov * dir;
+        }
+
+        vec3  src  = mix(raw, envC, nearReflection);
+        float srcL = dot(src, vec3(0.2126, 0.7152, 0.0722));
+        vec3  rimC = max(vec3(1.45 * srcL + 0.05) + 3.0 * (src - vec3(srcL)), 0.0);
+        if (bevelColorAlpha > 0.001) rimC = mix(rimC, bevelColor, bevelColorAlpha);
+        rimC = mix(rimC, vec3(1.0), clamp(0.6 * glowLocal, 0.0, 1.0));
+
+        // the rim is the one pixel, with a faint bleed 4.8 pt in (iOS 27: a
+        // 1.2 pt line plus 0.21 over 4.8 pt); press light gets further in
+        float band = clamp(1.0 - depthPx / (4.8 * px), 0.0, 1.0);
+        float rim  = (line + 0.21 * band * (1.0 - line)) * bevelStrength * rimLevel * lobe
+                   + (line + 0.6 * band) * glowLocal;
+        color = mix(color, rimC, clamp(rim, 0.0, 1.0));
     }
 
-    // the pressed spot fills with soft light (a small control fills entirely)
-    if (spot > 0.001)
-        color += vec3(1.0) * spot * 0.16;
+    color += glowAdd;
 
     color = clamp(color, 0.0, 1.0);
     float glassA = clamp(glassOpacity * cornerAlpha * coverage, 0.0, 1.0);

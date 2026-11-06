@@ -599,7 +599,8 @@ void registerHyprCtlCommand(HANDLE handle) {
                    "  minimize [address:0x..] [x y w h] [ms]   pour a window into a target rect (global logical px)\n"
                    "  restore  [address:0x..] [x y w h] [ms]   bring it back (default: the last one minimized)\n"
                    "  minimized                                list minimized windows (add -j for JSON)\n"
-                   "  touch X Y [hold_ms] | touch-hold X Y | touch-release | touch-probe X Y   light the glass as if pressed there\n";
+                   "  touch X Y [hold_ms] | touch-hold X Y | touch-release | touch-probe X Y   light the glass as if pressed there\n"
+                   "  touch-path X1 Y1 X2 Y2 ms                a press held and dragged along a line, then let go\n";
         },
     });
 }

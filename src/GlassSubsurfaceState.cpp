@@ -1,4 +1,5 @@
 #include "GlassSubsurfaceState.hpp"
+#include "Touch.hpp"
 #include "Diagnostics.hpp"
 #include "GlassDecoration.hpp"
 #include "Globals.hpp"
@@ -354,7 +355,7 @@ void CGlassSubsurfaceState::compositeAndRestore(Render::CRenderContext& ctx, PHL
                                      m_sampleFramebuffer, target,
                                      pixelBox, alpha,
                                      radii, roundingPower, m_samplePaddingRatio, resolveContext,
-                                     &maskInfo);
+                                     &maskInfo, 0.0f, nullptr, TouchLight::pressedOn(m_window.lock()));
 
     // Record the box/radii/roundingPower/preset already computed above for
     // `hyprctl hyprglass items` (Diagnostics.cpp) — a negative glassBoxSizePx

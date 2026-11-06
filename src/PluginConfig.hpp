@@ -68,6 +68,8 @@ enum class EDebugMode { OFF, HINTS_ONLY, GL_WORK_ONLY };
 // state or an unrecognized value (validateConfig() warns about the latter).
 [[nodiscard]] EDebugMode currentDebugMode();
 
+// A live float setting (plugin:hyprglass:...), or fallback before the config is read
+[[nodiscard]] float settingOr(Config::FLOAT* const* setting, float fallback);
 // plugin:hyprglass:tinted, clamped to 0..1 (0 when unset)
 [[nodiscard]] float tintedAmount();
 // Tinted glass is frostier: every preset's blur is scaled by this.
@@ -89,6 +91,19 @@ inline constexpr auto TINTED              = "plugin:hyprglass:tinted";
 inline constexpr auto EDGE_HIGHLIGHT      = "plugin:hyprglass:edge_highlight";
 // Scales the body lens: refraction across the whole pane (0 = rim only)
 inline constexpr auto LENS                = "plugin:hyprglass:lens";
+// The light that enters glass where it is pressed (Touch.hpp): 0 = off,
+// 1 = subtle (Apple 26.1 and later), 2 = bright (26.0's flash)
+inline constexpr auto PRESS_GLOW          = "plugin:hyprglass:press_glow";
+// How much of that light other glass panes catch, windows included (0..1)
+inline constexpr auto PRESS_SPILL         = "plugin:hyprglass:press_spill";
+// Where the rim is lit at rest: 0 = nowhere in particular, 1 = top (and,
+// fainter, bottom), 2 = top-left and bottom-right
+inline constexpr auto HIGHLIGHT_DIRECTION = "plugin:hyprglass:highlight_direction";
+// A thin dark line just inside the outline, so a pane reads on bright
+// backdrops (0..1)
+inline constexpr auto DARK_EDGE           = "plugin:hyprglass:dark_edge";
+// How much the rim takes its colour from just outside the pane (0..1)
+inline constexpr auto NEAR_REFLECTION     = "plugin:hyprglass:near_reflection";
 
 // Performance diagnostics
 inline constexpr auto DEBUG_MODE   = "plugin:hyprglass:debug:mode";
@@ -390,6 +405,11 @@ struct SPluginConfig {
     Config::FLOAT* const*   tinted        = nullptr;
     Config::FLOAT* const*   edgeHighlight = nullptr;
     Config::FLOAT* const*   lens          = nullptr;
+    Config::FLOAT* const*   pressGlow          = nullptr;
+    Config::FLOAT* const*   pressSpill         = nullptr;
+    Config::FLOAT* const*   highlightDirection = nullptr;
+    Config::FLOAT* const*   darkEdge           = nullptr;
+    Config::FLOAT* const*   nearReflection     = nullptr;
 
     // Performance diagnostics (see Diagnostics.hpp for the hyprctl side)
     StringConfigPtr         debugMode;
